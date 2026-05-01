@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 type CategoryType = "expense" | "income";
@@ -46,6 +47,21 @@ type Stats = {
   byCategory: Record<string, number>;
 };
 
+type SelectOption<T extends string = string> = {
+  value: T;
+  label: string;
+};
+
+type PersistedAccountingData = {
+  records: RecordItem[];
+  categories: Category[];
+};
+
+type BackupStatus = {
+  type: "idle" | "success" | "error";
+  message: string;
+};
+
 const DEFAULT_CATEGORIES: Category[] = [
   { id: "parking", name: "停车费", type: "expense" },
   { id: "rent", name: "房租", type: "expense" },
@@ -68,6 +84,7 @@ const COLORS = [
 
 const RECORDS_STORAGE_KEY = "accounting.records";
 const CATEGORIES_STORAGE_KEY = "accounting.categories";
+const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -78,7 +95,7 @@ const formatMoney = (value: number) =>
     maximumFractionDigits: 2,
   });
 
-function loadJson<T>(key: string, fallback: T): T {
+function loadFallbackJson<T>(key: string, fallback: T): T {
   try {
     const raw = window.localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as T) : fallback;
@@ -87,12 +104,80 @@ function loadJson<T>(key: string, fallback: T): T {
   }
 }
 
-function saveJson<T>(key: string, value: T) {
+function saveFallbackJson<T>(key: string, value: T) {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
     // Restricted WebViews can disable localStorage. In that case the app still works in memory.
   }
+}
+
+async function loadAccountingData(): Promise<PersistedAccountingData> {
+  const fallbackData = loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
+    records: loadFallbackJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
+    categories: loadFallbackJson<Category[]>(CATEGORIES_STORAGE_KEY, DEFAULT_CATEGORIES),
+  });
+
+  try {
+    const raw = await invoke<string>("load_accounting_store");
+    if (!raw) return fallbackData;
+    const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
+    return {
+      records: Array.isArray(parsed.records) ? parsed.records : fallbackData.records,
+      categories: Array.isArray(parsed.categories)
+        ? parsed.categories
+        : fallbackData.categories,
+    };
+  } catch {
+    return fallbackData;
+  }
+}
+
+async function saveAccountingData(data: PersistedAccountingData) {
+  saveFallbackJson(FALLBACK_STORAGE_KEY, data);
+  saveFallbackJson(RECORDS_STORAGE_KEY, data.records);
+  saveFallbackJson(CATEGORIES_STORAGE_KEY, data.categories);
+
+  try {
+    await invoke("save_accounting_store", {
+      payload: JSON.stringify(data),
+    });
+  } catch {
+    // Browser-only preview keeps using localStorage fallback.
+  }
+}
+
+function normalizeAccountingData(value: unknown): PersistedAccountingData | null {
+  if (!value || typeof value !== "object") return null;
+
+  const data = value as Partial<PersistedAccountingData>;
+  if (!Array.isArray(data.records) || !Array.isArray(data.categories)) return null;
+
+  const categories = data.categories.filter((category): category is Category => {
+    return (
+      !!category &&
+      typeof category.id === "string" &&
+      typeof category.name === "string" &&
+      (category.type === "expense" || category.type === "income")
+    );
+  });
+
+  const categoryIds = new Set(categories.map((category) => category.id));
+  const records = data.records.filter((record): record is RecordItem => {
+    return (
+      !!record &&
+      typeof record.id === "number" &&
+      typeof record.catId === "string" &&
+      categoryIds.has(record.catId) &&
+      typeof record.amount === "number" &&
+      Number.isFinite(record.amount) &&
+      record.amount > 0 &&
+      typeof record.date === "string"
+    );
+  });
+
+  if (categories.length === 0) return null;
+  return { records, categories };
 }
 
 function createInitialForm(categories: Category[], type: CategoryType = "expense"): RecordForm {
@@ -107,12 +192,9 @@ function createInitialForm(categories: Category[], type: CategoryType = "expense
 }
 
 function App() {
-  const [records, setRecords] = useState<RecordItem[]>(() =>
-    loadJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
-  );
-  const [categories, setCategories] = useState<Category[]>(() =>
-    loadJson<Category[]>(CATEGORIES_STORAGE_KEY, DEFAULT_CATEGORIES),
-  );
+  const [records, setRecords] = useState<RecordItem[]>([]);
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [storageLoaded, setStorageLoaded] = useState(false);
   const [tab, setTab] = useState<TabKey>("dashboard");
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
@@ -121,6 +203,11 @@ function App() {
     cat: "all",
     month: "",
   });
+  const [backupStatus, setBackupStatus] = useState<BackupStatus>({
+    type: "idle",
+    message: "",
+  });
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const [form, setForm] = useState<RecordForm>(() => createInitialForm(DEFAULT_CATEGORIES));
   const [catForm, setCatForm] = useState<CategoryForm>({
     name: "",
@@ -128,12 +215,29 @@ function App() {
   });
 
   useEffect(() => {
-    saveJson(RECORDS_STORAGE_KEY, records);
-  }, [records]);
+    let cancelled = false;
+
+    loadAccountingData()
+      .then((data) => {
+        if (cancelled) return;
+        setRecords(data.records);
+        setCategories(data.categories.length > 0 ? data.categories : DEFAULT_CATEGORIES);
+        setStorageLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStorageLoaded(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
-    saveJson(CATEGORIES_STORAGE_KEY, categories);
-  }, [categories]);
+    if (!storageLoaded) return;
+    void saveAccountingData({ records, categories });
+  }, [records, categories, storageLoaded]);
 
   const getCat = (id: string): Category =>
     categories.find((cat) => cat.id === id) ?? {
@@ -291,14 +395,70 @@ function App() {
     setRecords((items) => items.filter((record) => record.catId !== id));
   }
 
+  function exportBackup() {
+    const data: PersistedAccountingData = { records, categories };
+    const content = JSON.stringify(data, null, 2);
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const filename = `wangyuan-accounting-backup-${today()}.json`;
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    setBackupStatus({
+      type: "success",
+      message: `已导出 ${records.length} 条记录。`,
+    });
+  }
+
+  function openImportPicker() {
+    importInputRef.current?.click();
+  }
+
+  async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = normalizeAccountingData(JSON.parse(text));
+      if (!parsed) {
+        setBackupStatus({ type: "error", message: "导入失败：文件格式不正确。" });
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `导入会覆盖当前 ${records.length} 条记录和 ${categories.length} 个分类。确认导入 ${parsed.records.length} 条记录吗？`,
+      );
+      if (!confirmed) {
+        setBackupStatus({ type: "idle", message: "" });
+        return;
+      }
+
+      setRecords(parsed.records);
+      setCategories(parsed.categories);
+      setBackupStatus({
+        type: "success",
+        message: `已导入 ${parsed.records.length} 条记录。`,
+      });
+    } catch {
+      setBackupStatus({ type: "error", message: "导入失败：无法读取 JSON 文件。" });
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">账</div>
           <div>
-            <div className="brand-name">简账</div>
-            <div className="brand-subtitle">本地记账工作台</div>
+            <div className="brand-name">王源专属记账工作台</div>
           </div>
         </div>
 
@@ -391,6 +551,14 @@ function App() {
           form={form}
           setForm={setForm}
           onSave={saveQuickRecord}
+        />
+
+        <BackupPanel
+          status={backupStatus}
+          onExport={exportBackup}
+          onImport={openImportPicker}
+          importInputRef={importInputRef}
+          onImportFile={importBackup}
         />
 
         <section className="side-card">
@@ -501,40 +669,37 @@ function RecordsView({
       <div className="records-toolbar">
         <PanelHeader title="收支明细" description="筛选、编辑或删除记录" />
         <div className="filter-row">
-          <select
+          <CustomSelect
+            label="全部类型"
             value={filter.type}
-            onChange={(event) =>
-              setFilter((value) => ({ ...value, type: event.target.value as FilterType }))
-            }
-          >
-            <option value="all">全部类型</option>
-            <option value="expense">支出</option>
-            <option value="income">收入</option>
-          </select>
-          <select
+            options={[
+              { value: "all", label: "全部类型" },
+              { value: "expense", label: "支出" },
+              { value: "income", label: "收入" },
+            ]}
+            onChange={(type) => setFilter((value) => ({ ...value, type }))}
+          />
+          <CustomSelect
+            label="全部分类"
             value={filter.cat}
-            onChange={(event) => setFilter((value) => ({ ...value, cat: event.target.value }))}
-          >
-            <option value="all">全部分类</option>
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-          <select
+            options={[
+              { value: "all", label: "全部分类" },
+              ...categories.map((category) => ({
+                value: category.id,
+                label: category.name,
+              })),
+            ]}
+            onChange={(cat) => setFilter((value) => ({ ...value, cat }))}
+          />
+          <CustomSelect
+            label="全部月份"
             value={filter.month}
-            onChange={(event) =>
-              setFilter((value) => ({ ...value, month: event.target.value }))
-            }
-          >
-            <option value="">全部月份</option>
-            {months.map((month) => (
-              <option key={month} value={month}>
-                {month}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "全部月份" },
+              ...months.map((month) => ({ value: month, label: month })),
+            ]}
+            onChange={(month) => setFilter((value) => ({ ...value, month }))}
+          />
         </div>
       </div>
 
@@ -582,15 +747,15 @@ function CategoriesView({
       <section className="panel-block">
         <PanelHeader title="新增分类" description="为收入或支出添加自定义分类" />
         <div className="category-editor">
-          <select
+          <CustomSelect
+            label="分类类型"
             value={catForm.type}
-            onChange={(event) =>
-              setCatForm((value) => ({ ...value, type: event.target.value as CategoryType }))
-            }
-          >
-            <option value="expense">支出</option>
-            <option value="income">收入</option>
-          </select>
+            options={[
+              { value: "expense", label: "支出" },
+              { value: "income", label: "收入" },
+            ]}
+            onChange={(type) => setCatForm((value) => ({ ...value, type }))}
+          />
           <input
             value={catForm.name}
             placeholder="分类名称"
@@ -697,18 +862,17 @@ function RecordFormFields({
 
       <label>
         <span>分类</span>
-        <select
+        <CustomSelect
+          label="分类"
           value={form.catId}
-          onChange={(event) => setForm((value) => ({ ...value, catId: event.target.value }))}
-        >
-          {categories
+          options={categories
             .filter((category) => category.type === form.type)
-            .map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-        </select>
+            .map((category) => ({
+              value: category.id,
+              label: category.name,
+            }))}
+          onChange={(catId) => setForm((value) => ({ ...value, catId }))}
+        />
       </label>
 
       <label>
@@ -740,6 +904,59 @@ function RecordFormFields({
           onChange={(event) => setForm((value) => ({ ...value, note: event.target.value }))}
         />
       </label>
+    </div>
+  );
+}
+
+function CustomSelect<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: SelectOption<T>[];
+  onChange: (value: T) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = options.find((option) => option.value === value) ?? options[0];
+
+  function choose(nextValue: T) {
+    onChange(nextValue);
+    setOpen(false);
+  }
+
+  return (
+    <div className={`custom-select ${open ? "open" : ""}`} onBlur={() => setOpen(false)}>
+      <button
+        className="custom-select-trigger"
+        type="button"
+        aria-label={label}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((state) => !state)}
+      >
+        <span>{current?.label ?? label}</span>
+        <i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="custom-select-menu" role="listbox" tabIndex={-1}>
+          {options.map((option) => (
+            <button
+              className={option.value === value ? "selected" : ""}
+              key={option.value}
+              role="option"
+              aria-selected={option.value === value}
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
