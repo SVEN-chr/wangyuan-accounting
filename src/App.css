@@ -820,6 +820,58 @@ button {
   margin-top: 14px;
 }
 
+.backup-card {
+  display: grid;
+  gap: 12px;
+}
+
+.backup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.backup-actions button {
+  min-height: 40px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.backup-primary {
+  color: #ffffff;
+  background: linear-gradient(135deg, #0f766e, #2563eb);
+  box-shadow: 0 10px 24px rgba(15, 118, 110, 0.16);
+}
+
+.backup-secondary {
+  color: #315f55;
+  background: #e8f3ef;
+}
+
+.backup-file-input {
+  display: none;
+}
+
+.backup-status {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.backup-status.success {
+  color: #0f766e;
+  background: #e3f5ee;
+}
+
+.backup-status.error {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+
 .mini-list {
   display: grid;
   gap: 8px;
@@ -865,6 +917,103 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: 24px;
   box-shadow: 0 28px 90px rgba(13, 27, 23, 0.3);
+}
+
+.delete-confirm-card {
+  display: grid;
+  justify-items: center;
+  width: min(440px, 100%);
+  padding: 26px;
+  text-align: center;
+}
+
+.delete-confirm-icon {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  margin-bottom: 14px;
+  color: #b91c1c;
+  font-size: 28px;
+  font-weight: 900;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  border-radius: 18px;
+}
+
+.delete-confirm-copy h2,
+.delete-confirm-copy p,
+.delete-record-summary {
+  margin: 0;
+}
+
+.delete-confirm-copy h2 {
+  color: #13231f;
+  font-size: 21px;
+  line-height: 1.2;
+}
+
+.delete-confirm-copy p {
+  max-width: 320px;
+  margin-top: 8px;
+  color: #6d7e78;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.delete-record-summary {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  margin-top: 18px;
+  padding: 14px;
+  background: #f8fbf9;
+  border: 1px solid #e1ebe6;
+  border-radius: 16px;
+  text-align: left;
+}
+
+.delete-record-summary div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.delete-record-summary dt {
+  color: #7d8d87;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.delete-record-summary dd {
+  margin: 0;
+  color: #13231f;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.delete-confirm-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+  margin-top: 18px;
+}
+
+.delete-confirm-actions button {
+  min-height: 44px;
+  color: #315f55;
+  font-weight: 850;
+  background: #e8f3ef;
+  border-radius: 13px;
+  cursor: pointer;
+}
+
+.delete-confirm-actions button.danger {
+  color: #ffffff;
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  box-shadow: 0 12px 26px rgba(220, 38, 38, 0.2);
 }
 
 .modal-header {

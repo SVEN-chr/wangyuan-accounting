@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import * as XLSX from "xlsx";
 import "./App.css";
 
 type CategoryType = "expense" | "income";
@@ -57,6 +58,8 @@ type PersistedAccountingData = {
   categories: Category[];
 };
 
+type ExcelRow = Record<string, unknown>;
+
 type BackupStatus = {
   type: "idle" | "success" | "error";
   message: string;
@@ -85,6 +88,11 @@ const COLORS = [
 const RECORDS_STORAGE_KEY = "accounting.records";
 const CATEGORIES_STORAGE_KEY = "accounting.categories";
 const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
+const EXCEL_RECORD_SHEET = "收支记录";
+const EXCEL_CATEGORY_SHEET = "分类";
+const EXCEL_SUMMARY_SHEET = "汇总";
+const EXCEL_RECORD_HEADERS = ["记录ID", "日期", "类型", "分类", "金额", "备注"];
+const EXCEL_CATEGORY_HEADERS = ["分类ID", "分类名称", "类型"];
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -134,50 +142,95 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
 }
 
 async function saveAccountingData(data: PersistedAccountingData) {
-  saveFallbackJson(FALLBACK_STORAGE_KEY, data);
-  saveFallbackJson(RECORDS_STORAGE_KEY, data.records);
-  saveFallbackJson(CATEGORIES_STORAGE_KEY, data.categories);
-
   try {
     await invoke("save_accounting_store", {
       payload: JSON.stringify(data),
     });
   } catch {
     // Browser-only preview keeps using localStorage fallback.
+    saveFallbackJson(FALLBACK_STORAGE_KEY, data);
+    saveFallbackJson(RECORDS_STORAGE_KEY, data.records);
+    saveFallbackJson(CATEGORIES_STORAGE_KEY, data.categories);
   }
 }
 
-function normalizeAccountingData(value: unknown): PersistedAccountingData | null {
-  if (!value || typeof value !== "object") return null;
+function categoryTypeLabel(type: CategoryType) {
+  return type === "income" ? "收入" : "支出";
+}
 
-  const data = value as Partial<PersistedAccountingData>;
-  if (!Array.isArray(data.records) || !Array.isArray(data.categories)) return null;
+function parseCategoryType(value: unknown): CategoryType | null {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["收入", "income", "in", "收"].includes(text)) return "income";
+  if (["支出", "expense", "out", "支"].includes(text)) return "expense";
+  return null;
+}
 
-  const categories = data.categories.filter((category): category is Category => {
-    return (
-      !!category &&
-      typeof category.id === "string" &&
-      typeof category.name === "string" &&
-      (category.type === "expense" || category.type === "income")
-    );
-  });
+function readExcelCell(row: ExcelRow, keys: string[]) {
+  for (const key of keys) {
+    const value = row[key];
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+  return "";
+}
 
-  const categoryIds = new Set(categories.map((category) => category.id));
-  const records = data.records.filter((record): record is RecordItem => {
-    return (
-      !!record &&
-      typeof record.id === "number" &&
-      typeof record.catId === "string" &&
-      categoryIds.has(record.catId) &&
-      typeof record.amount === "number" &&
-      Number.isFinite(record.amount) &&
-      record.amount > 0 &&
-      typeof record.date === "string"
-    );
-  });
+function parseExcelAmount(value: unknown) {
+  if (typeof value === "number") return value;
+  const cleaned = String(value ?? "")
+    .replace(/[¥￥,\s]/g, "")
+    .trim();
+  const amount = Number(cleaned);
+  return Number.isFinite(amount) ? amount : NaN;
+}
 
-  if (categories.length === 0) return null;
-  return { records, categories };
+function parseExcelRecordId(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+function parseExcelDate(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      const month = String(parsed.m).padStart(2, "0");
+      const day = String(parsed.d).padStart(2, "0");
+      return `${parsed.y}-${month}-${day}`;
+    }
+  }
+
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+
+  const normalized = text.replace(/[./]/g, "-");
+  const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!match) return "";
+
+  const [, year, month, day] = match;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+function makeCategoryId(name: string, type: CategoryType, usedIds: Set<string>) {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^\da-z\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const base = `excel-${type}-${slug || "category"}`;
+  let next = base;
+  let index = 1;
+
+  while (usedIds.has(next)) {
+    index += 1;
+    next = `${base}-${index}`;
+  }
+
+  usedIds.add(next);
+  return next;
 }
 
 function createInitialForm(categories: Category[], type: CategoryType = "expense"): RecordForm {
@@ -197,6 +250,7 @@ function App() {
   const [storageLoaded, setStorageLoaded] = useState(false);
   const [tab, setTab] = useState<TabKey>("dashboard");
   const [modalOpen, setModalOpen] = useState(false);
+  const [pendingDeleteRecord, setPendingDeleteRecord] = useState<RecordItem | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
   const [filter, setFilter] = useState<FilterState>({
     type: "all",
@@ -371,7 +425,16 @@ function App() {
   }
 
   function deleteRecord(id: number) {
-    setRecords((items) => items.filter((record) => record.id !== id));
+    const record = records.find((item) => item.id === id);
+    if (!record) return;
+
+    setPendingDeleteRecord(record);
+  }
+
+  function confirmDeleteRecord() {
+    if (!pendingDeleteRecord) return;
+    setRecords((items) => items.filter((record) => record.id !== pendingDeleteRecord.id));
+    setPendingDeleteRecord(null);
   }
 
   function addCategory() {
@@ -395,25 +458,74 @@ function App() {
     setRecords((items) => items.filter((record) => record.catId !== id));
   }
 
-  function exportBackup() {
-    const data: PersistedAccountingData = { records, categories };
-    const content = JSON.stringify(data, null, 2);
-    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const filename = `wangyuan-accounting-backup-${today()}.json`;
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-
-    setBackupStatus({
-      type: "success",
-      message: `已导出 ${records.length} 条记录。`,
+  async function exportBackup() {
+    const recordRows = sortedRecords.map((record) => {
+      const category = getCat(record.catId);
+      return {
+        记录ID: record.id,
+        日期: record.date,
+        类型: categoryTypeLabel(category.type),
+        分类: category.name,
+        金额: record.amount,
+        备注: record.note ?? "",
+      };
     });
+    const categoryRows = categories.map((category) => ({
+      分类ID: category.id,
+      分类名称: category.name,
+      类型: categoryTypeLabel(category.type),
+    }));
+    const summaryRows = [
+      ["指标", "金额"],
+      ["总余额", stats.balance],
+      ["总收入", stats.income],
+      ["总支出", stats.expense],
+      ["记录数量", records.length],
+      ["分类数量", categories.length],
+    ];
+    const workbook = XLSX.utils.book_new();
+    const recordSheet = XLSX.utils.json_to_sheet(recordRows, {
+      header: EXCEL_RECORD_HEADERS,
+    });
+    const categorySheet = XLSX.utils.json_to_sheet(categoryRows, {
+      header: EXCEL_CATEGORY_HEADERS,
+    });
+    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+
+    recordSheet["!cols"] = [
+      { wch: 16 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 16 },
+      { wch: 12 },
+      { wch: 24 },
+    ];
+    categorySheet["!cols"] = [{ wch: 24 }, { wch: 16 }, { wch: 10 }];
+    summarySheet["!cols"] = [{ wch: 14 }, { wch: 14 }];
+
+    XLSX.utils.book_append_sheet(workbook, recordSheet, EXCEL_RECORD_SHEET);
+    XLSX.utils.book_append_sheet(workbook, categorySheet, EXCEL_CATEGORY_SHEET);
+    XLSX.utils.book_append_sheet(workbook, summarySheet, EXCEL_SUMMARY_SHEET);
+    const filename = `wangyuan-accounting-${today()}.xlsx`;
+
+    try {
+      const content = XLSX.write(workbook, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+      const path = await invoke<string>("save_excel_backup", {
+        filename,
+        bytes: Array.from(new Uint8Array(content)),
+      });
+
+      setBackupStatus({
+        type: "success",
+        message: `已导出 ${records.length} 条记录：${path}`,
+      });
+    } catch {
+      XLSX.writeFile(workbook, filename);
+      setBackupStatus({
+        type: "success",
+        message: `已导出 ${records.length} 条记录到 Excel。`,
+      });
+    }
   }
 
   function openImportPicker() {
@@ -426,29 +538,102 @@ function App() {
     if (!file) return;
 
     try {
-      const text = await file.text();
-      const parsed = normalizeAccountingData(JSON.parse(text));
-      if (!parsed) {
-        setBackupStatus({ type: "error", message: "导入失败：文件格式不正确。" });
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { cellDates: true });
+      const recordSheet =
+        workbook.Sheets[EXCEL_RECORD_SHEET] ??
+        workbook.Sheets[workbook.SheetNames[0]];
+
+      if (!recordSheet) {
+        setBackupStatus({ type: "error", message: "导入失败：Excel 中没有可读取的工作表。" });
+        return;
+      }
+
+      const usedCategoryIds = new Set<string>();
+      const importedCategories: Category[] = [];
+      const categoryByKey = new Map<string, Category>();
+      const categorySheet = workbook.Sheets[EXCEL_CATEGORY_SHEET];
+
+      if (categorySheet) {
+        const categoryRows = XLSX.utils.sheet_to_json<ExcelRow>(categorySheet, { defval: "" });
+        categoryRows.forEach((row) => {
+          const name = String(readExcelCell(row, ["分类名称", "分类", "name"])).trim();
+          const type = parseCategoryType(readExcelCell(row, ["类型", "收支类型", "type"]));
+          if (!name || !type) return;
+
+          const rawId = String(readExcelCell(row, ["分类ID", "id"])).trim();
+          const id = rawId && !usedCategoryIds.has(rawId)
+            ? rawId
+            : makeCategoryId(name, type, usedCategoryIds);
+          usedCategoryIds.add(id);
+
+          const category = { id, name, type };
+          importedCategories.push(category);
+          categoryByKey.set(`${type}:${name}`, category);
+        });
+      }
+
+      const recordRows = XLSX.utils.sheet_to_json<ExcelRow>(recordSheet, { defval: "" });
+      let skipped = 0;
+      const importedRecords = recordRows.reduce<RecordItem[]>((items, row, index) => {
+        const rawAmount = parseExcelAmount(readExcelCell(row, ["金额", "amount"]));
+        const typeFromCell = parseCategoryType(readExcelCell(row, ["类型", "收支类型", "type"]));
+        const type = typeFromCell ?? (rawAmount < 0 ? "expense" : "income");
+        const categoryName = String(readExcelCell(row, ["分类", "分类名称", "category"])).trim();
+        const date = parseExcelDate(readExcelCell(row, ["日期", "date"]));
+        const amount = Math.abs(rawAmount);
+
+        if (!categoryName || !date || !Number.isFinite(amount) || amount <= 0) {
+          skipped += 1;
+          return items;
+        }
+
+        const categoryKey = `${type}:${categoryName}`;
+        let category = categoryByKey.get(categoryKey);
+        if (!category) {
+          category = {
+            id: makeCategoryId(categoryName, type, usedCategoryIds),
+            name: categoryName,
+            type,
+          };
+          importedCategories.push(category);
+          categoryByKey.set(categoryKey, category);
+        }
+
+        items.push({
+          id: parseExcelRecordId(
+            readExcelCell(row, ["记录ID", "id"]),
+            Date.now() + index,
+          ),
+          catId: category.id,
+          amount,
+          date,
+          note: String(readExcelCell(row, ["备注", "note"])).trim(),
+        });
+        return items;
+      }, []);
+
+      if (importedRecords.length === 0) {
+        setBackupStatus({ type: "error", message: "导入失败：Excel 中没有有效的收支记录。" });
         return;
       }
 
       const confirmed = window.confirm(
-        `导入会覆盖当前 ${records.length} 条记录和 ${categories.length} 个分类。确认导入 ${parsed.records.length} 条记录吗？`,
+        `导入 Excel 会覆盖当前 ${records.length} 条记录和 ${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录吗？`,
       );
       if (!confirmed) {
         setBackupStatus({ type: "idle", message: "" });
         return;
       }
 
-      setRecords(parsed.records);
-      setCategories(parsed.categories);
+      setRecords(importedRecords);
+      setCategories(importedCategories);
       setBackupStatus({
         type: "success",
-        message: `已导入 ${parsed.records.length} 条记录。`,
+        message: `已导入 ${importedRecords.length} 条记录${skipped > 0 ? `，跳过 ${skipped} 行` : ""}。`,
       });
     } catch {
-      setBackupStatus({ type: "error", message: "导入失败：无法读取 JSON 文件。" });
+      setBackupStatus({ type: "error", message: "导入失败：无法读取 Excel 文件。" });
     }
   }
 
@@ -595,6 +780,42 @@ function App() {
             <button className="submit-button" onClick={saveRecord} type="button">
               {editId !== null ? "保存修改" : "确认记账"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteRecord && (
+        <div className="modal-backdrop" onClick={() => setPendingDeleteRecord(null)}>
+          <div className="modal-card delete-confirm-card" onClick={(event) => event.stopPropagation()}>
+            <div className="delete-confirm-icon" aria-hidden="true">
+              !
+            </div>
+            <div className="delete-confirm-copy">
+              <h2>确认删除这条记录？</h2>
+              <p>删除后会立即从本地数据中移除，无法在应用内撤回。</p>
+            </div>
+            <dl className="delete-record-summary">
+              <div>
+                <dt>分类</dt>
+                <dd>{getCat(pendingDeleteRecord.catId).name}</dd>
+              </div>
+              <div>
+                <dt>金额</dt>
+                <dd>{formatMoney(pendingDeleteRecord.amount)}</dd>
+              </div>
+              <div>
+                <dt>日期</dt>
+                <dd>{pendingDeleteRecord.date}</dd>
+              </div>
+            </dl>
+            <div className="delete-confirm-actions">
+              <button type="button" onClick={() => setPendingDeleteRecord(null)}>
+                取消
+              </button>
+              <button className="danger" type="button" onClick={confirmDeleteRecord}>
+                确认删除
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -817,6 +1038,47 @@ function QuickEntry({
       <button className="submit-button" onClick={onSave} type="button">
         保存记录
       </button>
+    </section>
+  );
+}
+
+function BackupPanel({
+  status,
+  onExport,
+  onImport,
+  importInputRef,
+  onImportFile,
+}: {
+  status: BackupStatus;
+  onExport: () => void;
+  onImport: () => void;
+  importInputRef: React.RefObject<HTMLInputElement | null>;
+  onImportFile: (event: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
+  return (
+    <section className="side-card backup-card">
+      <div className="side-card-heading">
+        <h2>数据备份</h2>
+        <span>XLSX</span>
+      </div>
+      <div className="backup-actions">
+        <button className="backup-primary" onClick={onExport} type="button">
+          导出 Excel
+        </button>
+        <button className="backup-secondary" onClick={onImport} type="button">
+          导入 Excel
+        </button>
+      </div>
+      <input
+        ref={importInputRef}
+        className="backup-file-input"
+        type="file"
+        accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+        onChange={onImportFile}
+      />
+      {status.message && (
+        <p className={`backup-status ${status.type}`}>{status.message}</p>
+      )}
     </section>
   );
 }
