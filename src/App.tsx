@@ -399,7 +399,7 @@ function App() {
                 <option value="all">全部分类</option>
                 {categories.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.icon} {c.name}
+                    {c.name}
                   </option>
                 ))}
               </select>
@@ -474,9 +474,7 @@ function App() {
                   return (
                     <div key={cat.id} style={{ marginBottom: 12 }}>
                       <div style={categoryRowStyle}>
-                        <span style={{ fontSize: 13 }}>
-                          {cat.icon} {cat.name}
-                        </span>
+                        <span style={{ fontSize: 13 }}>{cat.name}</span>
                         <span
                           style={{
                             fontSize: 13,
@@ -558,7 +556,6 @@ function App() {
                     );
                     return (
                       <div key={cat.id} style={categoryItemStyle}>
-                        <span style={categoryIconStyle}>{cat.icon}</span>
                         <span style={categoryNameStyle}>{cat.name}</span>
                         {isDefault ? (
                           <span style={defaultBadgeStyle}>默认</span>
@@ -640,7 +637,7 @@ function App() {
                       }}
                       type="button"
                     >
-                      {cat.icon} {cat.name}
+                      {cat.name}
                     </button>
                   ))}
               </div>
@@ -700,7 +697,6 @@ function RecordCard({
 }) {
   return (
     <div style={recordCardStyle}>
-      <div style={recordIconStyle}>{cat.icon}</div>
       <div style={recordInfoStyle}>
         <div style={recordNameStyle}>{cat.name}</div>
         <div style={recordMetaStyle}>
@@ -726,8 +722,7 @@ function RecordCard({
 }
 
 const appShellStyle: React.CSSProperties = {
-  maxWidth: 480,
-  margin: "0 auto",
+  width: "100%",
   minHeight: "100vh",
   background: "#f8fafc",
   fontFamily: "system-ui, sans-serif",
@@ -809,20 +804,6 @@ const recordCardStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 12,
   boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-};
-
-const recordIconStyle: React.CSSProperties = {
-  width: 32,
-  height: 32,
-  borderRadius: 10,
-  background: "#eef2ff",
-  color: "#4f46e5",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontSize: 14,
-  fontWeight: 700,
-  flexShrink: 0,
 };
 
 const recordInfoStyle: React.CSSProperties = {
@@ -977,19 +958,6 @@ const categoryItemStyle: React.CSSProperties = {
   gap: 10,
   padding: "8px 0",
   borderBottom: "1px solid #f1f5f9",
-};
-
-const categoryIconStyle: React.CSSProperties = {
-  width: 28,
-  height: 28,
-  borderRadius: 9,
-  background: "#f8fafc",
-  color: "#475569",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontSize: 13,
-  fontWeight: 700,
 };
 
 const categoryNameStyle: React.CSSProperties = {
