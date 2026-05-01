@@ -9,7 +9,7 @@ type Category = {
   id: string;
   name: string;
   type: CategoryType;
-  icon: string;
+  icon?: string;
 };
 
 type RecordItem = {
@@ -39,44 +39,44 @@ type FilterState = {
   month: string;
 };
 
-type PieDatum = {
-  label: string;
-  value: number;
+type Stats = {
+  income: number;
+  expense: number;
+  balance: number;
+  byCategory: Record<string, number>;
 };
 
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: "parking", name: "停车费", type: "expense", icon: "P" },
-  { id: "rent", name: "房租", type: "expense", icon: "房" },
-  { id: "fuel", name: "加油", type: "expense", icon: "油" },
-  { id: "entertainment", name: "商务招待", type: "expense", icon: "宴" },
-  { id: "buy-book", name: "收书", type: "expense", icon: "书" },
-  { id: "sell-book", name: "卖书", type: "income", icon: "收" },
+  { id: "parking", name: "停车费", type: "expense" },
+  { id: "rent", name: "房租", type: "expense" },
+  { id: "fuel", name: "加油", type: "expense" },
+  { id: "entertainment", name: "商务招待", type: "expense" },
+  { id: "buy-book", name: "收书", type: "expense" },
+  { id: "sell-book", name: "卖书", type: "income" },
 ];
 
 const COLORS = [
-  "#6366f1",
-  "#f59e0b",
-  "#10b981",
-  "#ef4444",
-  "#3b82f6",
-  "#ec4899",
-  "#8b5cf6",
-  "#14b8a6",
-  "#f97316",
-  "#84cc16",
+  "#0f766e",
+  "#2563eb",
+  "#d97706",
+  "#dc2626",
+  "#7c3aed",
+  "#0891b2",
+  "#65a30d",
+  "#be185d",
 ];
 
 const RECORDS_STORAGE_KEY = "accounting.records";
 const CATEGORIES_STORAGE_KEY = "accounting.categories";
 
-const fmt = (n: number) =>
+const today = () => new Date().toISOString().slice(0, 10);
+
+const formatMoney = (value: number) =>
   "¥" +
-  Number(n).toLocaleString("zh-CN", {
+  Number(value).toLocaleString("zh-CN", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-
-const today = () => new Date().toISOString().slice(0, 10);
 
 function loadJson<T>(key: string, fallback: T): T {
   try {
@@ -91,8 +91,19 @@ function saveJson<T>(key: string, value: T) {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // localStorage can be unavailable in restricted WebViews; the app remains usable in memory.
+    // Restricted WebViews can disable localStorage. In that case the app still works in memory.
   }
+}
+
+function createInitialForm(categories: Category[], type: CategoryType = "expense"): RecordForm {
+  const category = categories.find((cat) => cat.type === type) ?? categories[0];
+  return {
+    type: category?.type ?? type,
+    catId: category?.id ?? DEFAULT_CATEGORIES[0].id,
+    amount: "",
+    date: today(),
+    note: "",
+  };
 }
 
 function App() {
@@ -103,20 +114,14 @@ function App() {
     loadJson<Category[]>(CATEGORIES_STORAGE_KEY, DEFAULT_CATEGORIES),
   );
   const [tab, setTab] = useState<TabKey>("dashboard");
-  const [modal, setModal] = useState<"add" | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [filter, setFilter] = useState<FilterState>({
     type: "all",
     cat: "all",
     month: "",
   });
-  const [form, setForm] = useState<RecordForm>({
-    type: "expense",
-    catId: "parking",
-    amount: "",
-    date: today(),
-    note: "",
-  });
+  const [form, setForm] = useState<RecordForm>(() => createInitialForm(DEFAULT_CATEGORIES));
   const [catForm, setCatForm] = useState<CategoryForm>({
     name: "",
     type: "expense",
@@ -131,552 +136,295 @@ function App() {
   }, [categories]);
 
   const getCat = (id: string): Category =>
-    categories.find((c) => c.id === id) ?? {
+    categories.find((cat) => cat.id === id) ?? {
       id: "unknown",
-      name: "未知",
-      icon: "?",
+      name: "未知分类",
       type: "expense",
     };
 
-  const filteredRecords = useMemo(() => {
+  const sortedRecords = useMemo(() => {
     return records
-      .filter((r) => {
-        const cat = getCat(r.catId);
-        if (filter.type !== "all" && cat.type !== filter.type) return false;
-        if (filter.cat !== "all" && r.catId !== filter.cat) return false;
-        if (filter.month && !r.date.startsWith(filter.month)) return false;
-        return true;
-      })
+      .slice()
       .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-  }, [records, filter, categories]);
+  }, [records]);
 
-  const stats = useMemo(() => {
+  const filteredRecords = useMemo(() => {
+    return sortedRecords.filter((record) => {
+      const category = getCat(record.catId);
+      if (filter.type !== "all" && category.type !== filter.type) return false;
+      if (filter.cat !== "all" && record.catId !== filter.cat) return false;
+      if (filter.month && !record.date.startsWith(filter.month)) return false;
+      return true;
+    });
+  }, [sortedRecords, filter, categories]);
+
+  const stats = useMemo<Stats>(() => {
     const income = records
-      .filter((r) => getCat(r.catId).type === "income")
-      .reduce((s, r) => s + r.amount, 0);
+      .filter((record) => getCat(record.catId).type === "income")
+      .reduce((sum, record) => sum + record.amount, 0);
     const expense = records
-      .filter((r) => getCat(r.catId).type === "expense")
-      .reduce((s, r) => s + r.amount, 0);
+      .filter((record) => getCat(record.catId).type === "expense")
+      .reduce((sum, record) => sum + record.amount, 0);
     const byCategory: Record<string, number> = {};
 
-    records.forEach((r) => {
-      byCategory[r.catId] = (byCategory[r.catId] || 0) + r.amount;
+    records.forEach((record) => {
+      byCategory[record.catId] = (byCategory[record.catId] || 0) + record.amount;
     });
 
     return { income, expense, balance: income - expense, byCategory };
   }, [records, categories]);
 
   const months = useMemo(() => {
-    const ms = new Set(records.map((r) => r.date.slice(0, 7)));
-    return [...ms].sort().reverse();
+    return [...new Set(records.map((record) => record.date.slice(0, 7)))]
+      .sort()
+      .reverse();
   }, [records]);
 
-  const pieData = Object.entries(stats.byCategory)
-    .filter(([, v]) => v > 0)
-    .map(([id, value]) => ({ label: getCat(id).name, value }))
-    .sort((a, b) => b.value - a.value);
+  const categoryStats = useMemo(() => {
+    return categories
+      .map((category) => ({
+        category,
+        amount: stats.byCategory[category.id] || 0,
+      }))
+      .filter((item) => item.amount > 0)
+      .sort((a, b) => b.amount - a.amount);
+  }, [categories, stats.byCategory]);
 
-  function openAdd() {
-    const firstCat = categories.find((cat) => cat.type === "expense") ?? categories[0];
-    setForm({
-      type: firstCat?.type ?? "expense",
-      catId: firstCat?.id ?? "parking",
-      amount: "",
-      date: today(),
-      note: "",
-    });
+  function openAddModal() {
+    setForm(createInitialForm(categories));
     setEditId(null);
-    setModal("add");
+    setModalOpen(true);
   }
 
-  function openEdit(rec: RecordItem) {
-    const cat = getCat(rec.catId);
+  function openEditModal(record: RecordItem) {
+    const category = getCat(record.catId);
     setForm({
-      type: cat.type,
-      catId: rec.catId,
-      amount: String(rec.amount),
-      date: rec.date,
-      note: rec.note || "",
+      type: category.type,
+      catId: record.catId,
+      amount: String(record.amount),
+      date: record.date,
+      note: record.note || "",
     });
-    setEditId(rec.id);
-    setModal("add");
+    setEditId(record.id);
+    setModalOpen(true);
+  }
+
+  function resetForm(type: CategoryType = "expense") {
+    setForm(createInitialForm(categories, type));
+    setEditId(null);
   }
 
   function saveRecord() {
     const amount = Number(form.amount);
-    if (!form.amount || Number.isNaN(amount) || amount <= 0) return;
+    if (!form.catId || !form.amount || Number.isNaN(amount) || amount <= 0) return;
 
     if (editId !== null) {
-      setRecords((rs) =>
-        rs.map((r) =>
-          r.id === editId
+      setRecords((items) =>
+        items.map((record) =>
+          record.id === editId
             ? {
-                ...r,
+                ...record,
                 catId: form.catId,
                 amount,
                 date: form.date,
-                note: form.note,
+                note: form.note.trim(),
               }
-            : r,
+            : record,
         ),
       );
     } else {
-      setRecords((rs) => [
-        ...rs,
+      setRecords((items) => [
+        ...items,
         {
           id: Date.now(),
           catId: form.catId,
           amount,
           date: form.date,
-          note: form.note,
+          note: form.note.trim(),
         },
       ]);
     }
 
-    setModal(null);
+    setModalOpen(false);
+    resetForm(form.type);
+  }
+
+  function saveQuickRecord() {
+    const amount = Number(form.amount);
+    if (!form.catId || !form.amount || Number.isNaN(amount) || amount <= 0) return;
+
+    setRecords((items) => [
+      ...items,
+      {
+        id: Date.now(),
+        catId: form.catId,
+        amount,
+        date: form.date,
+        note: form.note.trim(),
+      },
+    ]);
+    resetForm(form.type);
   }
 
   function deleteRecord(id: number) {
-    setRecords((rs) => rs.filter((r) => r.id !== id));
+    setRecords((items) => items.filter((record) => record.id !== id));
   }
 
   function addCategory() {
-    if (!catForm.name.trim()) return;
-    const id = `custom-${Date.now()}`;
-    setCategories((cs) => [
-      ...cs,
+    const name = catForm.name.trim();
+    if (!name) return;
+
+    setCategories((items) => [
+      ...items,
       {
-        id,
-        name: catForm.name.trim(),
+        id: `custom-${Date.now()}`,
+        name,
         type: catForm.type,
-        icon: catForm.type === "income" ? "入" : "支",
       },
     ]);
     setCatForm({ name: "", type: "expense" });
   }
 
   function deleteCategory(id: string) {
-    if (DEFAULT_CATEGORIES.find((c) => c.id === id)) return;
-    setCategories((cs) => cs.filter((c) => c.id !== id));
-  }
-
-  function PieChart({ data }: { data: PieDatum[] }) {
-    if (!data.length) {
-      return <div style={emptyStateStyle}>暂无数据</div>;
-    }
-
-    const total = data.reduce((s, d) => s + d.value, 0);
-    let angle = 0;
-    const slices = data.map((d, i) => {
-      const pct = d.value / total;
-      const startAngle = angle;
-      angle += pct * 2 * Math.PI;
-      const x1 = 50 + 40 * Math.sin(startAngle);
-      const y1 = 50 - 40 * Math.cos(startAngle);
-      const x2 = 50 + 40 * Math.sin(angle);
-      const y2 = 50 - 40 * Math.cos(angle);
-      const large = pct > 0.5 ? 1 : 0;
-
-      return {
-        ...d,
-        path: `M50,50 L${x1},${y1} A40,40 0 ${large},1 ${x2},${y2} Z`,
-        color: COLORS[i % COLORS.length],
-        pct,
-      };
-    });
-
-    return (
-      <div style={pieWrapStyle}>
-        <svg viewBox="0 0 100 100" style={{ width: 160, height: 160 }}>
-          {slices.length === 1 ? (
-            <circle cx="50" cy="50" r="40" fill={slices[0].color} />
-          ) : (
-            slices.map((s, i) => <path key={i} d={s.path} fill={s.color} />)
-          )}
-        </svg>
-        <div style={legendGridStyle}>
-          {slices.map((s, i) => (
-            <div key={i} style={legendItemStyle}>
-              <span
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 2,
-                  background: s.color,
-                  display: "inline-block",
-                  flexShrink: 0,
-                }}
-              />
-              <span style={legendTextStyle}>{s.label}</span>
-              <span style={legendPctStyle}>{(s.pct * 100).toFixed(0)}%</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
+    if (DEFAULT_CATEGORIES.some((category) => category.id === id)) return;
+    setCategories((items) => items.filter((category) => category.id !== id));
+    setRecords((items) => items.filter((record) => record.catId !== id));
   }
 
   return (
-    <div style={appShellStyle}>
-      <div style={headerStyle}>
-        <div style={headerLabelStyle}>总余额</div>
-        <div style={balanceStyle}>{fmt(stats.balance)}</div>
-        <div style={summaryStyle}>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">账</div>
           <div>
-            <div style={summaryLabelStyle}>总收入</div>
-            <div style={summaryValueStyle}>{fmt(stats.income)}</div>
-          </div>
-          <div>
-            <div style={summaryLabelStyle}>总支出</div>
-            <div style={summaryValueStyle}>{fmt(stats.expense)}</div>
+            <div className="brand-name">简账</div>
+            <div className="brand-subtitle">本地记账工作台</div>
           </div>
         </div>
-      </div>
 
-      <div style={tabsStyle}>
-        {(
-          [
-            ["dashboard", "概览"],
-            ["records", "明细"],
-            ["stats", "统计"],
-            ["cats", "分类"],
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            style={{
-              ...tabButtonStyle,
-              fontWeight: tab === key ? 700 : 400,
-              color: tab === key ? "#6366f1" : "#64748b",
-              borderBottom:
-                tab === key ? "2px solid #6366f1" : "2px solid transparent",
-            }}
-            type="button"
-          >
-            {label}
+        <nav className="nav-list" aria-label="主导航">
+          {(
+            [
+              ["dashboard", "总览", "余额、近期记录"],
+              ["records", "明细", "筛选和编辑"],
+              ["stats", "统计", "分类占比"],
+              ["cats", "分类", "自定义收支"],
+            ] as const
+          ).map(([key, label, helper]) => (
+            <button
+              className={`nav-item ${tab === key ? "active" : ""}`}
+              key={key}
+              onClick={() => setTab(key)}
+              type="button"
+            >
+              <span>{label}</span>
+              <small>{helper}</small>
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-balance">
+          <span>当前结余</span>
+          <strong>{formatMoney(stats.balance)}</strong>
+        </div>
+      </aside>
+
+      <main className="main-panel">
+        <section className="hero-panel">
+          <div>
+            <h1>财务总览</h1>
+            <p>记录收入、支出和分类趋势，数据保存在本机。</p>
+          </div>
+          <button className="primary-action" onClick={openAddModal} type="button">
+            新增记录
           </button>
-        ))}
-      </div>
+        </section>
 
-      <div style={{ padding: "16px" }}>
-        {tab === "dashboard" && (
-          <div>
-            <div style={sectionTitleStyle}>近期记录</div>
-            {records.length === 0 && (
-              <div style={emptyStateStyle}>还没有记录，点击右下角 + 开始记账</div>
-            )}
-            {records
-              .slice()
-              .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id)
-              .slice(0, 10)
-              .map((rec) => {
-                const cat = getCat(rec.catId);
-                return <RecordCard key={rec.id} cat={cat} rec={rec} />;
-              })}
+        <section className="metric-grid" aria-label="财务指标">
+          <MetricCard label="总余额" value={formatMoney(stats.balance)} tone="balance" />
+          <MetricCard label="总收入" value={formatMoney(stats.income)} tone="income" />
+          <MetricCard label="总支出" value={formatMoney(stats.expense)} tone="expense" />
+        </section>
+
+        <section className="content-panel">
+          {tab === "dashboard" && (
+            <DashboardView
+              records={sortedRecords}
+              categoryStats={categoryStats}
+              stats={stats}
+              getCat={getCat}
+            />
+          )}
+
+          {tab === "records" && (
+            <RecordsView
+              records={filteredRecords}
+              categories={categories}
+              filter={filter}
+              months={months}
+              getCat={getCat}
+              setFilter={setFilter}
+              onEdit={openEditModal}
+              onDelete={deleteRecord}
+            />
+          )}
+
+          {tab === "stats" && (
+            <StatsView categoryStats={categoryStats} stats={stats} />
+          )}
+
+          {tab === "cats" && (
+            <CategoriesView
+              categories={categories}
+              catForm={catForm}
+              setCatForm={setCatForm}
+              onAdd={addCategory}
+              onDelete={deleteCategory}
+            />
+          )}
+        </section>
+      </main>
+
+      <aside className="right-panel">
+        <QuickEntry
+          categories={categories}
+          form={form}
+          setForm={setForm}
+          onSave={saveQuickRecord}
+        />
+
+        <section className="side-card">
+          <div className="side-card-heading">
+            <h2>最近记录</h2>
+            <span>{records.length} 条</span>
           </div>
-        )}
-
-        {tab === "records" && (
-          <div>
-            <div style={filtersStyle}>
-              <select
-                value={filter.type}
-                onChange={(e) =>
-                  setFilter((f) => ({ ...f, type: e.target.value as FilterType }))
-                }
-                style={selectStyle}
-              >
-                <option value="all">全部类型</option>
-                <option value="income">收入</option>
-                <option value="expense">支出</option>
-              </select>
-              <select
-                value={filter.cat}
-                onChange={(e) => setFilter((f) => ({ ...f, cat: e.target.value }))}
-                style={selectStyle}
-              >
-                <option value="all">全部分类</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={filter.month}
-                onChange={(e) =>
-                  setFilter((f) => ({ ...f, month: e.target.value }))
-                }
-                style={selectStyle}
-              >
-                <option value="">全部月份</option>
-                {months.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {filteredRecords.length === 0 && (
-              <div style={emptyStateStyle}>没有符合条件的记录</div>
-            )}
-            {filteredRecords.map((rec) => {
-              const cat = getCat(rec.catId);
-              return (
-                <RecordCard
-                  key={rec.id}
-                  cat={cat}
-                  rec={rec}
-                  actions={
-                    <div style={recordActionsStyle}>
-                      <button
-                        onClick={() => openEdit(rec)}
-                        style={editButtonStyle}
-                        type="button"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        onClick={() => deleteRecord(rec.id)}
-                        style={deleteButtonStyle}
-                        type="button"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  }
-                />
-              );
-            })}
-          </div>
-        )}
-
-        {tab === "stats" && (
-          <div>
-            <div style={panelStyle}>
-              <div style={panelTitleStyle}>各分类占比</div>
-              <PieChart data={pieData} />
-            </div>
-            <div style={panelStyle}>
-              <div style={panelTitleStyle}>分类明细</div>
-              {categories
-                .filter((c) => stats.byCategory[c.id])
-                .sort(
-                  (a, b) =>
-                    (stats.byCategory[b.id] || 0) - (stats.byCategory[a.id] || 0),
-                )
-                .map((cat, i) => {
-                  const amt = stats.byCategory[cat.id] || 0;
-                  const total = cat.type === "income" ? stats.income : stats.expense;
-                  const pct = total > 0 ? (amt / total) * 100 : 0;
-                  return (
-                    <div key={cat.id} style={{ marginBottom: 12 }}>
-                      <div style={categoryRowStyle}>
-                        <span style={{ fontSize: 13 }}>{cat.name}</span>
-                        <span
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 600,
-                            color: cat.type === "income" ? "#10b981" : "#ef4444",
-                          }}
-                        >
-                          {fmt(amt)}
-                        </span>
-                      </div>
-                      <div style={progressTrackStyle}>
-                        <div
-                          style={{
-                            height: 6,
-                            borderRadius: 3,
-                            width: `${pct}%`,
-                            background: COLORS[i % COLORS.length],
-                            transition: "width 0.4s",
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              {pieData.length === 0 && <div style={emptyStateStyle}>暂无数据</div>}
-            </div>
-          </div>
-        )}
-
-        {tab === "cats" && (
-          <div>
-            <div style={panelStyle}>
-              <div style={panelTitleStyle}>添加自定义分类</div>
-              <div style={categoryFormStyle}>
-                <select
-                  value={catForm.type}
-                  onChange={(e) =>
-                    setCatForm((f) => ({
-                      ...f,
-                      type: e.target.value as CategoryType,
-                    }))
-                  }
-                  style={selectStyle}
-                >
-                  <option value="expense">支出</option>
-                  <option value="income">收入</option>
-                </select>
-                <input
-                  placeholder="分类名称"
-                  value={catForm.name}
-                  onChange={(e) =>
-                    setCatForm((f) => ({ ...f, name: e.target.value }))
-                  }
-                  onKeyDown={(e) => e.key === "Enter" && addCategory()}
-                  style={categoryNameInputStyle}
-                />
-                <button onClick={addCategory} style={primarySmallButtonStyle} type="button">
-                  添加
-                </button>
-              </div>
-            </div>
-            {(["expense", "income"] as const).map((type) => (
-              <div key={type} style={panelStyle}>
-                <div
-                  style={{
-                    fontWeight: 700,
-                    fontSize: 13,
-                    color: type === "income" ? "#10b981" : "#ef4444",
-                    marginBottom: 10,
-                  }}
-                >
-                  {type === "income" ? "收入分类" : "支出分类"}
-                </div>
-                {categories
-                  .filter((c) => c.type === type)
-                  .map((cat) => {
-                    const isDefault = !!DEFAULT_CATEGORIES.find(
-                      (d) => d.id === cat.id,
-                    );
-                    return (
-                      <div key={cat.id} style={categoryItemStyle}>
-                        <span style={categoryNameStyle}>{cat.name}</span>
-                        {isDefault ? (
-                          <span style={defaultBadgeStyle}>默认</span>
-                        ) : (
-                          <button
-                            onClick={() => deleteCategory(cat.id)}
-                            style={deleteButtonStyle}
-                            type="button"
-                          >
-                            删除
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
+          <div className="mini-list">
+            {sortedRecords.slice(0, 5).map((record) => (
+              <MiniRecord key={record.id} record={record} category={getCat(record.catId)} />
             ))}
+            {sortedRecords.length === 0 && <EmptyState text="暂无记录" compact />}
           </div>
-        )}
-      </div>
+        </section>
+      </aside>
 
-      <button onClick={openAdd} style={fabStyle} type="button" aria-label="添加记录">
+      <button className="floating-action" onClick={openAddModal} type="button" aria-label="新增记录">
         +
       </button>
 
-      {modal === "add" && (
-        <div style={modalOverlayStyle} onClick={() => setModal(null)}>
-          <div style={modalSheetStyle} onClick={(e) => e.stopPropagation()}>
-            <div style={modalTitleStyle}>
-              {editId !== null ? "编辑记录" : "添加记录"}
-            </div>
-
-            <div style={typeSelectorStyle}>
-              {(["expense", "income"] as const).map((type) => (
-                <button
-                  key={type}
-                  onClick={() => {
-                    const firstOfType = categories.find((c) => c.type === type);
-                    setForm((f) => ({
-                      ...f,
-                      type,
-                      catId: firstOfType?.id || f.catId,
-                    }));
-                  }}
-                  style={{
-                    ...typeButtonStyle,
-                    background: form.type === type ? "#fff" : "transparent",
-                    color:
-                      form.type === type
-                        ? type === "income"
-                          ? "#10b981"
-                          : "#ef4444"
-                        : "#94a3b8",
-                    boxShadow:
-                      form.type === type ? "0 1px 4px rgba(0,0,0,0.1)" : "none",
-                  }}
-                  type="button"
-                >
-                  {type === "expense" ? "支出" : "收入"}
-                </button>
-              ))}
-            </div>
-
-            <div style={fieldStyle}>
-              <div style={fieldLabelStyle}>分类</div>
-              <div style={categoryChipsStyle}>
-                {categories
-                  .filter((c) => c.type === form.type)
-                  .map((cat) => (
-                    <button
-                      key={cat.id}
-                      onClick={() => setForm((f) => ({ ...f, catId: cat.id }))}
-                      style={{
-                        ...chipStyle,
-                        borderColor:
-                          form.catId === cat.id ? "#6366f1" : "#e2e8f0",
-                        background: form.catId === cat.id ? "#eef2ff" : "#fff",
-                        color: form.catId === cat.id ? "#6366f1" : "#475569",
-                      }}
-                      type="button"
-                    >
-                      {cat.name}
-                    </button>
-                  ))}
+      {modalOpen && (
+        <div className="modal-backdrop" onClick={() => setModalOpen(false)}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h2>{editId !== null ? "编辑记录" : "新增记录"}</h2>
+                <p>选择分类、金额和日期后保存。</p>
               </div>
+              <button className="icon-button" onClick={() => setModalOpen(false)} type="button">
+                ×
+              </button>
             </div>
-
-            <div style={fieldStyle}>
-              <div style={fieldLabelStyle}>金额（元）</div>
-              <input
-                type="number"
-                placeholder="0.00"
-                value={form.amount}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, amount: e.target.value }))
-                }
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={fieldStyle}>
-              <div style={fieldLabelStyle}>日期</div>
-              <input
-                type="date"
-                value={form.date}
-                onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={{ marginBottom: 20 }}>
-              <div style={fieldLabelStyle}>备注（可选）</div>
-              <input
-                placeholder="添加备注..."
-                value={form.note}
-                onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
-                style={inputStyle}
-              />
-            </div>
-
-            <button onClick={saveRecord} style={primaryButtonStyle} type="button">
+            <RecordFormFields categories={categories} form={form} setForm={setForm} />
+            <button className="submit-button" onClick={saveRecord} type="button">
               {editId !== null ? "保存修改" : "确认记账"}
             </button>
           </div>
@@ -686,401 +434,483 @@ function App() {
   );
 }
 
-function RecordCard({
-  cat,
-  rec,
-  actions,
+function MetricCard({
+  label,
+  value,
+  tone,
 }: {
-  cat: Category;
-  rec: RecordItem;
-  actions?: React.ReactNode;
+  label: string;
+  value: string;
+  tone: "balance" | "income" | "expense";
 }) {
   return (
-    <div style={recordCardStyle}>
-      <div style={recordInfoStyle}>
-        <div style={recordNameStyle}>{cat.name}</div>
-        <div style={recordMetaStyle}>
-          {rec.date}
-          {rec.note ? ` · ${rec.note}` : ""}
-        </div>
-      </div>
-      <div
-        style={{
-          fontWeight: 700,
-          fontSize: 15,
-          color: cat.type === "income" ? "#10b981" : "#ef4444",
-          marginRight: actions ? 4 : 0,
-          whiteSpace: "nowrap",
-        }}
-      >
-        {cat.type === "income" ? "+" : "-"}
-        {fmt(rec.amount)}
-      </div>
-      {actions}
+    <article className={`metric-card ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  );
+}
+
+function DashboardView({
+  records,
+  categoryStats,
+  stats,
+  getCat,
+}: {
+  records: RecordItem[];
+  categoryStats: { category: Category; amount: number }[];
+  stats: Stats;
+  getCat: (id: string) => Category;
+}) {
+  return (
+    <div className="dashboard-grid">
+      <section className="panel-block wide">
+        <PanelHeader title="近期记录" description="最近 10 条收支动态" />
+        <RecordTable records={records.slice(0, 10)} getCat={getCat} />
+      </section>
+
+      <section className="panel-block">
+        <PanelHeader title="分类排行" description="按金额排序" />
+        <CategoryBars items={categoryStats} income={stats.income} expense={stats.expense} />
+      </section>
     </div>
   );
 }
 
-const appShellStyle: React.CSSProperties = {
-  width: "100%",
-  minHeight: "100vh",
-  background: "#f8fafc",
-  fontFamily: "system-ui, sans-serif",
-  paddingBottom: 80,
-};
+function RecordsView({
+  records,
+  categories,
+  filter,
+  months,
+  getCat,
+  setFilter,
+  onEdit,
+  onDelete,
+}: {
+  records: RecordItem[];
+  categories: Category[];
+  filter: FilterState;
+  months: string[];
+  getCat: (id: string) => Category;
+  setFilter: React.Dispatch<React.SetStateAction<FilterState>>;
+  onEdit: (record: RecordItem) => void;
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <section className="panel-block">
+      <div className="records-toolbar">
+        <PanelHeader title="收支明细" description="筛选、编辑或删除记录" />
+        <div className="filter-row">
+          <select
+            value={filter.type}
+            onChange={(event) =>
+              setFilter((value) => ({ ...value, type: event.target.value as FilterType }))
+            }
+          >
+            <option value="all">全部类型</option>
+            <option value="expense">支出</option>
+            <option value="income">收入</option>
+          </select>
+          <select
+            value={filter.cat}
+            onChange={(event) => setFilter((value) => ({ ...value, cat: event.target.value }))}
+          >
+            <option value="all">全部分类</option>
+            {categories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={filter.month}
+            onChange={(event) =>
+              setFilter((value) => ({ ...value, month: event.target.value }))
+            }
+          >
+            <option value="">全部月份</option>
+            {months.map((month) => (
+              <option key={month} value={month}>
+                {month}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
 
-const headerStyle: React.CSSProperties = {
-  background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
-  padding: "20px 20px 32px",
-  borderRadius: "0 0 24px 24px",
-};
+      <RecordTable records={records} getCat={getCat} onEdit={onEdit} onDelete={onDelete} />
+    </section>
+  );
+}
 
-const headerLabelStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.85)",
-  fontSize: 13,
-  marginBottom: 4,
-};
+function StatsView({
+  categoryStats,
+  stats,
+}: {
+  categoryStats: { category: Category; amount: number }[];
+  stats: Stats;
+}) {
+  return (
+    <div className="stats-grid">
+      <section className="panel-block">
+        <PanelHeader title="分类占比" description="收入与支出的合计分布" />
+        <DonutChart items={categoryStats} />
+      </section>
+      <section className="panel-block">
+        <PanelHeader title="分类明细" description="每个分类的金额和占比" />
+        <CategoryBars items={categoryStats} income={stats.income} expense={stats.expense} />
+      </section>
+    </div>
+  );
+}
 
-const balanceStyle: React.CSSProperties = {
-  color: "#fff",
-  fontSize: 36,
-  fontWeight: 700,
-};
+function CategoriesView({
+  categories,
+  catForm,
+  setCatForm,
+  onAdd,
+  onDelete,
+}: {
+  categories: Category[];
+  catForm: CategoryForm;
+  setCatForm: React.Dispatch<React.SetStateAction<CategoryForm>>;
+  onAdd: () => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <div className="category-layout">
+      <section className="panel-block">
+        <PanelHeader title="新增分类" description="为收入或支出添加自定义分类" />
+        <div className="category-editor">
+          <select
+            value={catForm.type}
+            onChange={(event) =>
+              setCatForm((value) => ({ ...value, type: event.target.value as CategoryType }))
+            }
+          >
+            <option value="expense">支出</option>
+            <option value="income">收入</option>
+          </select>
+          <input
+            value={catForm.name}
+            placeholder="分类名称"
+            onChange={(event) => setCatForm((value) => ({ ...value, name: event.target.value }))}
+            onKeyDown={(event) => event.key === "Enter" && onAdd()}
+          />
+          <button onClick={onAdd} type="button">
+            添加
+          </button>
+        </div>
+      </section>
 
-const summaryStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 24,
-  marginTop: 16,
-};
+      {(["expense", "income"] as const).map((type) => (
+        <section className="panel-block" key={type}>
+          <PanelHeader title={type === "expense" ? "支出分类" : "收入分类"} />
+          <div className="category-list">
+            {categories
+              .filter((category) => category.type === type)
+              .map((category) => {
+                const isDefault = DEFAULT_CATEGORIES.some((item) => item.id === category.id);
+                return (
+                  <div className="category-row" key={category.id}>
+                    <span>{category.name}</span>
+                    {isDefault ? (
+                      <small>默认</small>
+                    ) : (
+                      <button onClick={() => onDelete(category.id)} type="button">
+                        删除
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
 
-const summaryLabelStyle: React.CSSProperties = {
-  color: "rgba(255,255,255,0.7)",
-  fontSize: 11,
-};
+function QuickEntry({
+  categories,
+  form,
+  setForm,
+  onSave,
+}: {
+  categories: Category[];
+  form: RecordForm;
+  setForm: React.Dispatch<React.SetStateAction<RecordForm>>;
+  onSave: () => void;
+}) {
+  return (
+    <section className="side-card quick-entry">
+      <div className="side-card-heading">
+        <h2>快速记一笔</h2>
+        <span>{form.type === "expense" ? "支出" : "收入"}</span>
+      </div>
+      <RecordFormFields categories={categories} form={form} setForm={setForm} compact />
+      <button className="submit-button" onClick={onSave} type="button">
+        保存记录
+      </button>
+    </section>
+  );
+}
 
-const summaryValueStyle: React.CSSProperties = {
-  color: "#fff",
-  fontWeight: 600,
-  fontSize: 15,
-};
+function RecordFormFields({
+  categories,
+  form,
+  setForm,
+  compact = false,
+}: {
+  categories: Category[];
+  form: RecordForm;
+  setForm: React.Dispatch<React.SetStateAction<RecordForm>>;
+  compact?: boolean;
+}) {
+  function setType(type: CategoryType) {
+    const firstCategory = categories.find((category) => category.type === type);
+    setForm((value) => ({
+      ...value,
+      type,
+      catId: firstCategory?.id ?? value.catId,
+    }));
+  }
 
-const tabsStyle: React.CSSProperties = {
-  display: "flex",
-  background: "#fff",
-  borderBottom: "1px solid #e2e8f0",
-  position: "sticky",
-  top: 0,
-  zIndex: 10,
-};
+  return (
+    <div className={`record-form ${compact ? "compact" : ""}`}>
+      <div className="segmented">
+        <button
+          className={form.type === "expense" ? "active expense" : ""}
+          onClick={() => setType("expense")}
+          type="button"
+        >
+          支出
+        </button>
+        <button
+          className={form.type === "income" ? "active income" : ""}
+          onClick={() => setType("income")}
+          type="button"
+        >
+          收入
+        </button>
+      </div>
 
-const tabButtonStyle: React.CSSProperties = {
-  flex: 1,
-  padding: "12px 0",
-  fontSize: 12,
-  background: "none",
-  border: "none",
-  cursor: "pointer",
-};
+      <label>
+        <span>分类</span>
+        <select
+          value={form.catId}
+          onChange={(event) => setForm((value) => ({ ...value, catId: event.target.value }))}
+        >
+          {categories
+            .filter((category) => category.type === form.type)
+            .map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+        </select>
+      </label>
 
-const sectionTitleStyle: React.CSSProperties = {
-  fontWeight: 700,
-  fontSize: 15,
-  marginBottom: 12,
-  color: "#1e293b",
-};
+      <label>
+        <span>金额</span>
+        <input
+          type="number"
+          inputMode="decimal"
+          min="0"
+          placeholder="0.00"
+          value={form.amount}
+          onChange={(event) => setForm((value) => ({ ...value, amount: event.target.value }))}
+        />
+      </label>
 
-const emptyStateStyle: React.CSSProperties = {
-  textAlign: "center",
-  color: "#94a3b8",
-  padding: "40px 0",
-};
+      <label>
+        <span>日期</span>
+        <input
+          type="date"
+          value={form.date}
+          onChange={(event) => setForm((value) => ({ ...value, date: event.target.value }))}
+        />
+      </label>
 
-const recordCardStyle: React.CSSProperties = {
-  background: "#fff",
-  borderRadius: 12,
-  padding: "12px 14px",
-  marginBottom: 8,
-  display: "flex",
-  alignItems: "center",
-  gap: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-};
+      <label>
+        <span>备注</span>
+        <input
+          placeholder="可选"
+          value={form.note}
+          onChange={(event) => setForm((value) => ({ ...value, note: event.target.value }))}
+        />
+      </label>
+    </div>
+  );
+}
 
-const recordInfoStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-};
+function RecordTable({
+  records,
+  getCat,
+  onEdit,
+  onDelete,
+}: {
+  records: RecordItem[];
+  getCat: (id: string) => Category;
+  onEdit?: (record: RecordItem) => void;
+  onDelete?: (id: number) => void;
+}) {
+  if (records.length === 0) {
+    return <EmptyState text="暂无记录，新增一笔后会显示在这里。" />;
+  }
 
-const recordNameStyle: React.CSSProperties = {
-  fontWeight: 600,
-  fontSize: 14,
-  color: "#1e293b",
-};
+  return (
+    <div className="record-table">
+      {records.map((record) => {
+        const category = getCat(record.catId);
+        const isIncome = category.type === "income";
+        return (
+          <div className="record-row" key={record.id}>
+            <div>
+              <strong>{category.name}</strong>
+              <span>
+                {record.date}
+                {record.note ? ` · ${record.note}` : ""}
+              </span>
+            </div>
+            <b className={isIncome ? "income-text" : "expense-text"}>
+              {isIncome ? "+" : "-"}
+              {formatMoney(record.amount)}
+            </b>
+            {(onEdit || onDelete) && (
+              <div className="row-actions">
+                {onEdit && (
+                  <button onClick={() => onEdit(record)} type="button">
+                    编辑
+                  </button>
+                )}
+                {onDelete && (
+                  <button className="danger" onClick={() => onDelete(record.id)} type="button">
+                    删除
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
-const recordMetaStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#94a3b8",
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-};
+function MiniRecord({ record, category }: { record: RecordItem; category: Category }) {
+  const isIncome = category.type === "income";
+  return (
+    <div className="mini-record">
+      <div>
+        <strong>{category.name}</strong>
+        <span>{record.date}</span>
+      </div>
+      <b className={isIncome ? "income-text" : "expense-text"}>
+        {isIncome ? "+" : "-"}
+        {formatMoney(record.amount)}
+      </b>
+    </div>
+  );
+}
 
-const filtersStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 8,
-  marginBottom: 12,
-  flexWrap: "wrap",
-};
+function CategoryBars({
+  items,
+  income,
+  expense,
+}: {
+  items: { category: Category; amount: number }[];
+  income: number;
+  expense: number;
+}) {
+  if (items.length === 0) {
+    return <EmptyState text="暂无统计数据。" compact />;
+  }
 
-const selectStyle: React.CSSProperties = {
-  padding: "6px 10px",
-  borderRadius: 8,
-  border: "1px solid #e2e8f0",
-  fontSize: 12,
-  background: "#fff",
-};
+  return (
+    <div className="category-bars">
+      {items.map(({ category, amount }, index) => {
+        const base = category.type === "income" ? income : expense;
+        const percent = base > 0 ? Math.round((amount / base) * 100) : 0;
+        return (
+          <div className="bar-item" key={category.id}>
+            <div>
+              <span>{category.name}</span>
+              <strong>{formatMoney(amount)}</strong>
+            </div>
+            <div className="bar-track">
+              <div
+                className="bar-fill"
+                style={{
+                  width: `${Math.max(percent, 4)}%`,
+                  background: COLORS[index % COLORS.length],
+                }}
+              />
+            </div>
+            <small>{percent}%</small>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
-const recordActionsStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 4,
-};
+function DonutChart({ items }: { items: { category: Category; amount: number }[] }) {
+  const total = items.reduce((sum, item) => sum + item.amount, 0);
+  let offset = 0;
 
-const editButtonStyle: React.CSSProperties = {
-  background: "#f1f5f9",
-  border: "none",
-  borderRadius: 6,
-  padding: "4px 8px",
-  cursor: "pointer",
-  fontSize: 12,
-  color: "#6366f1",
-};
+  if (items.length === 0 || total === 0) {
+    return <EmptyState text="暂无统计数据。" compact />;
+  }
 
-const deleteButtonStyle: React.CSSProperties = {
-  background: "#fef2f2",
-  border: "none",
-  borderRadius: 6,
-  padding: "4px 8px",
-  cursor: "pointer",
-  fontSize: 12,
-  color: "#ef4444",
-};
+  return (
+    <div className="donut-layout">
+      <svg viewBox="0 0 120 120" className="donut-chart" role="img" aria-label="分类占比图">
+        <circle cx="60" cy="60" r="44" className="donut-base" />
+        {items.map((item, index) => {
+          const fraction = item.amount / total;
+          const length = fraction * 276.46;
+          const strokeDasharray = `${length} ${276.46 - length}`;
+          const strokeDashoffset = -offset;
+          offset += length;
+          return (
+            <circle
+              key={item.category.id}
+              cx="60"
+              cy="60"
+              r="44"
+              className="donut-slice"
+              stroke={COLORS[index % COLORS.length]}
+              strokeDasharray={strokeDasharray}
+              strokeDashoffset={strokeDashoffset}
+            />
+          );
+        })}
+      </svg>
+      <div className="donut-legend">
+        {items.map((item, index) => (
+          <div key={item.category.id}>
+            <span style={{ background: COLORS[index % COLORS.length] }} />
+            <strong>{item.category.name}</strong>
+            <em>{Math.round((item.amount / total) * 100)}%</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
-const panelStyle: React.CSSProperties = {
-  background: "#fff",
-  borderRadius: 16,
-  padding: 16,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-  marginBottom: 16,
-};
+function PanelHeader({ title, description }: { title: string; description?: string }) {
+  return (
+    <div className="panel-header">
+      <h2>{title}</h2>
+      {description && <p>{description}</p>}
+    </div>
+  );
+}
 
-const panelTitleStyle: React.CSSProperties = {
-  fontWeight: 700,
-  fontSize: 14,
-  color: "#1e293b",
-  marginBottom: 12,
-};
-
-const pieWrapStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "center",
-  gap: 16,
-};
-
-const legendGridStyle: React.CSSProperties = {
-  width: "100%",
-  display: "grid",
-  gridTemplateColumns: "1fr 1fr",
-  columnGap: 16,
-  rowGap: 4,
-};
-
-const legendItemStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 4,
-  fontSize: 12,
-};
-
-const legendTextStyle: React.CSSProperties = {
-  color: "#334155",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const legendPctStyle: React.CSSProperties = {
-  marginLeft: "auto",
-  color: "#64748b",
-};
-
-const categoryRowStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  marginBottom: 4,
-};
-
-const progressTrackStyle: React.CSSProperties = {
-  height: 6,
-  background: "#f1f5f9",
-  borderRadius: 3,
-};
-
-const categoryFormStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 8,
-  marginBottom: 8,
-};
-
-const categoryNameInputStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  padding: "8px 12px",
-  borderRadius: 8,
-  border: "1px solid #e2e8f0",
-  fontSize: 13,
-};
-
-const primarySmallButtonStyle: React.CSSProperties = {
-  background: "#6366f1",
-  color: "#fff",
-  border: "none",
-  borderRadius: 8,
-  padding: "8px 14px",
-  cursor: "pointer",
-  fontWeight: 600,
-  fontSize: 13,
-};
-
-const categoryItemStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  padding: "8px 0",
-  borderBottom: "1px solid #f1f5f9",
-};
-
-const categoryNameStyle: React.CSSProperties = {
-  flex: 1,
-  fontSize: 14,
-  color: "#1e293b",
-};
-
-const defaultBadgeStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: "#94a3b8",
-  background: "#f1f5f9",
-  borderRadius: 4,
-  padding: "2px 6px",
-};
-
-const fabStyle: React.CSSProperties = {
-  position: "fixed",
-  bottom: 24,
-  right: 24,
-  width: 56,
-  height: 56,
-  borderRadius: "50%",
-  background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
-  color: "#fff",
-  fontSize: 28,
-  border: "none",
-  cursor: "pointer",
-  boxShadow: "0 4px 16px rgba(99,102,241,0.45)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 100,
-};
-
-const modalOverlayStyle: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.45)",
-  zIndex: 200,
-  display: "flex",
-  alignItems: "flex-end",
-  justifyContent: "center",
-};
-
-const modalSheetStyle: React.CSSProperties = {
-  background: "#fff",
-  borderRadius: "20px 20px 0 0",
-  padding: 24,
-  width: "100%",
-  maxWidth: 480,
-  paddingBottom: 40,
-};
-
-const modalTitleStyle: React.CSSProperties = {
-  fontWeight: 700,
-  fontSize: 16,
-  color: "#1e293b",
-  marginBottom: 20,
-  textAlign: "center",
-};
-
-const typeSelectorStyle: React.CSSProperties = {
-  display: "flex",
-  background: "#f1f5f9",
-  borderRadius: 10,
-  padding: 3,
-  marginBottom: 16,
-};
-
-const typeButtonStyle: React.CSSProperties = {
-  flex: 1,
-  padding: "8px 0",
-  borderRadius: 8,
-  border: "none",
-  cursor: "pointer",
-  fontWeight: 600,
-  fontSize: 13,
-};
-
-const fieldStyle: React.CSSProperties = {
-  marginBottom: 14,
-};
-
-const fieldLabelStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#64748b",
-  marginBottom: 6,
-};
-
-const categoryChipsStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 8,
-};
-
-const chipStyle: React.CSSProperties = {
-  padding: "6px 12px",
-  borderRadius: 20,
-  border: "2px solid",
-  fontSize: 13,
-  cursor: "pointer",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "10px 14px",
-  borderRadius: 10,
-  border: "1px solid #e2e8f0",
-  fontSize: 14,
-  boxSizing: "border-box",
-};
-
-const primaryButtonStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "14px 0",
-  borderRadius: 12,
-  border: "none",
-  background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
-  color: "#fff",
-  fontWeight: 700,
-  fontSize: 15,
-  cursor: "pointer",
-};
+function EmptyState({ text, compact = false }: { text: string; compact?: boolean }) {
+  return <div className={`empty-state ${compact ? "compact" : ""}`}>{text}</div>;
+}
 
 export default App;
