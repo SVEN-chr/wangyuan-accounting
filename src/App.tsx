@@ -1,17 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as XLSX from "xlsx";
 import "./App.css";
 
+/* =================================================================
+   Types & constants
+================================================================= */
+
 type CategoryType = "expense" | "income";
-type TabKey = "dashboard" | "records" | "stats" | "cats";
-type FilterType = CategoryType | "all";
+type CatShape = "square" | "circle" | "diamond" | "triangle" | "halfcircle";
+type PageKey = "ledger" | "stats" | "cats" | "backup";
+type EntryFilter = "all" | "expense" | "income" | "month";
 
 type Category = {
   id: string;
   name: string;
   type: CategoryType;
-  icon?: string;
+  shape: CatShape;
+  swatch: string;
 };
 
 type RecordItem = {
@@ -33,29 +45,14 @@ type RecordForm = {
 type CategoryForm = {
   name: string;
   type: CategoryType;
-};
-
-type FilterState = {
-  type: FilterType;
-  cat: string;
-  month: string;
-};
-
-type Stats = {
-  income: number;
-  expense: number;
-  balance: number;
-  byCategory: Record<string, number>;
-};
-
-type SelectOption<T extends string = string> = {
-  value: T;
-  label: string;
+  shape: CatShape;
+  swatch: string;
 };
 
 type PersistedAccountingData = {
   records: RecordItem[];
   categories: Category[];
+  openingBalance: number;
 };
 
 type ExcelRow = Record<string, unknown>;
@@ -65,43 +62,151 @@ type BackupStatus = {
   message: string;
 };
 
-const DEFAULT_CATEGORIES: Category[] = [
-  { id: "parking", name: "停车费", type: "expense" },
-  { id: "rent", name: "房租", type: "expense" },
-  { id: "fuel", name: "加油", type: "expense" },
-  { id: "entertainment", name: "商务招待", type: "expense" },
-  { id: "buy-book", name: "收书", type: "expense" },
-  { id: "sell-book", name: "卖书", type: "income" },
-];
-
-const COLORS = [
-  "#0f766e",
-  "#2563eb",
-  "#d97706",
-  "#dc2626",
-  "#7c3aed",
-  "#0891b2",
-  "#65a30d",
-  "#be185d",
-];
+type Stats = {
+  income: number;
+  expense: number;
+  balance: number;
+  byCat: Record<string, number>;
+  byDay: Record<string, number>;
+  byMonth: Record<string, { income: number; expense: number }>;
+};
 
 const RECORDS_STORAGE_KEY = "accounting.records";
 const CATEGORIES_STORAGE_KEY = "accounting.categories";
+const OPENING_BALANCE_STORAGE_KEY = "accounting.opening-balance";
 const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
+const FIRST_RUN_KEY = "accounting.first-run-seeded";
+const DEFAULT_OPENING_BALANCE = 0;
 const EXCEL_RECORD_SHEET = "收支记录";
 const EXCEL_CATEGORY_SHEET = "分类";
 const EXCEL_SUMMARY_SHEET = "汇总";
 const EXCEL_RECORD_HEADERS = ["记录ID", "日期", "类型", "分类", "金额", "备注"];
-const EXCEL_CATEGORY_HEADERS = ["分类ID", "分类名称", "类型"];
+const EXCEL_CATEGORY_HEADERS = ["分类ID", "分类名称", "类型", "形状", "颜色"];
+
+const PALETTE = [
+  "#B5532A",
+  "#7C3A0E",
+  "#5C7C2C",
+  "#92400E",
+  "#9B2226",
+  "#3D405B",
+  "#264653",
+  "#000000",
+];
+
+const SHAPES: CatShape[] = [
+  "square",
+  "circle",
+  "diamond",
+  "triangle",
+  "halfcircle",
+];
+
+const DEFAULT_CATEGORIES: Category[] = [
+  { id: "rent", name: "房租", type: "expense", swatch: "#C2410C", shape: "square" },
+  { id: "fuel", name: "加油", type: "expense", swatch: "#9A3412", shape: "diamond" },
+  { id: "parking", name: "停车费", type: "expense", swatch: "#B45309", shape: "circle" },
+  { id: "entertainment", name: "商务招待", type: "expense", swatch: "#92400E", shape: "triangle" },
+  { id: "buy-book", name: "收书", type: "expense", swatch: "#78350F", shape: "halfcircle" },
+  { id: "sell-book", name: "卖书", type: "income", swatch: "#3F6212", shape: "square" },
+  { id: "consult", name: "咨询费", type: "income", swatch: "#4D7C0F", shape: "circle" },
+];
+
+const SAMPLE_RECORDS: RecordItem[] = [
+  { id: 101, catId: "sell-book", amount: 4280, date: "2026-05-01", note: "孔网订单 · 古籍三函" },
+  { id: 102, catId: "fuel", amount: 312, date: "2026-04-30", note: "嘉实多 95#" },
+  { id: 103, catId: "parking", amount: 24, date: "2026-04-30" },
+  { id: 104, catId: "buy-book", amount: 1860, date: "2026-04-29", note: "潘家园早市" },
+  { id: 105, catId: "sell-book", amount: 980, date: "2026-04-29", note: "微信成交" },
+  { id: 106, catId: "entertainment", amount: 768, date: "2026-04-28", note: "晚饭 · 老主顾" },
+  { id: 107, catId: "rent", amount: 6800, date: "2026-04-28", note: "工作室四月" },
+  { id: 108, catId: "consult", amount: 2400, date: "2026-04-27", note: "鉴定费" },
+  { id: 109, catId: "parking", amount: 18, date: "2026-04-27" },
+  { id: 110, catId: "buy-book", amount: 3450, date: "2026-04-26", note: "私人藏家收书" },
+  { id: 111, catId: "fuel", amount: 286, date: "2026-04-25" },
+  { id: 112, catId: "sell-book", amount: 1560, date: "2026-04-24", note: "线下同行" },
+  { id: 113, catId: "entertainment", amount: 432, date: "2026-04-23" },
+  { id: 114, catId: "buy-book", amount: 2100, date: "2026-04-22", note: "民国版四册" },
+  { id: 115, catId: "sell-book", amount: 3200, date: "2026-04-21" },
+  { id: 116, catId: "parking", amount: 30, date: "2026-04-21" },
+  { id: 117, catId: "consult", amount: 1200, date: "2026-04-20" },
+  { id: 118, catId: "fuel", amount: 298, date: "2026-04-19" },
+  { id: 119, catId: "buy-book", amount: 880, date: "2026-04-18" },
+  { id: 120, catId: "sell-book", amount: 2680, date: "2026-04-17", note: "线装古籍一套" },
+  { id: 121, catId: "entertainment", amount: 596, date: "2026-04-16" },
+  { id: 122, catId: "parking", amount: 24, date: "2026-04-15" },
+  { id: 123, catId: "buy-book", amount: 1340, date: "2026-04-14" },
+  { id: 124, catId: "sell-book", amount: 5400, date: "2026-04-12", note: "整批出货" },
+  { id: 125, catId: "fuel", amount: 308, date: "2026-04-10" },
+  { id: 126, catId: "consult", amount: 800, date: "2026-04-08" },
+  { id: 127, catId: "buy-book", amount: 2240, date: "2026-04-06" },
+  { id: 128, catId: "sell-book", amount: 1980, date: "2026-04-04" },
+  { id: 129, catId: "entertainment", amount: 360, date: "2026-04-02" },
+  { id: 130, catId: "rent", amount: 6800, date: "2026-04-01", note: "工作室三月" },
+];
+
+/* =================================================================
+   Helpers
+================================================================= */
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-const formatMoney = (value: number) =>
-  "¥" +
-  Number(value).toLocaleString("zh-CN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+const fmtMoney = (n: number, decimals = 2) => {
+  return (
+    "¥" +
+    Number(n).toLocaleString("zh-CN", {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    })
+  );
+};
+
+const splitMoney = (n: number): [string, string] => {
+  const parts = Number(n).toFixed(2).split(".");
+  const intPart = Number(parts[0]).toLocaleString("zh-CN");
+  return [intPart, "." + parts[1]];
+};
+
+const fmtCompact = (n: number): string => {
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "−" : "";
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}${abs.toFixed(0)}`;
+};
+
+function buildMonthSeq(records: RecordItem[], now: Date): string[] {
+  const curStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const candidates = records.map((r) => r.date.slice(0, 7)).filter(Boolean);
+  candidates.push(curStr);
+  candidates.sort();
+  const endMonth = candidates[candidates.length - 1];
+  const [y, m] = endMonth.split("-").map(Number);
+  const seq: string[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(y, m - 1 - i, 1);
+    seq.push(
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+    );
+  }
+  return seq;
+}
+
+function timeGreeting(d: Date) {
+  const h = d.getHours();
+  if (h < 5) return "凌晨好";
+  if (h < 9) return "早上好";
+  if (h < 12) return "上午好";
+  if (h < 14) return "中午好";
+  if (h < 17) return "下午好";
+  if (h < 19) return "傍晚好";
+  return "晚上好";
+}
+
+function weekdayCN(d: Date | string) {
+  const date = typeof d === "string" ? new Date(d) : d;
+  return ["日", "一", "二", "三", "四", "五", "六"][date.getDay()];
+}
 
 function loadFallbackJson<T>(key: string, fallback: T): T {
   try {
@@ -116,46 +221,67 @@ function saveFallbackJson<T>(key: string, value: T) {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // Restricted WebViews can disable localStorage. In that case the app still works in memory.
+    /* swallow — restricted webview */
   }
 }
 
+function migrateCategory(c: Partial<Category>, fallback?: Category): Category {
+  const def = fallback ?? DEFAULT_CATEGORIES[0];
+  return {
+    id: c.id ?? def.id,
+    name: c.name ?? def.name,
+    type: (c.type as CategoryType) ?? def.type,
+    shape: (c.shape as CatShape) ?? def.shape,
+    swatch: c.swatch ?? def.swatch,
+  };
+}
+
 async function loadAccountingData(): Promise<PersistedAccountingData> {
-  const fallbackData = loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
+  const fb = loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
     records: loadFallbackJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
-    categories: loadFallbackJson<Category[]>(CATEGORIES_STORAGE_KEY, DEFAULT_CATEGORIES),
+    categories: loadFallbackJson<Category[]>(
+      CATEGORIES_STORAGE_KEY,
+      DEFAULT_CATEGORIES,
+    ),
+    openingBalance: loadFallbackJson<number>(
+      OPENING_BALANCE_STORAGE_KEY,
+      DEFAULT_OPENING_BALANCE,
+    ),
   });
 
   try {
     const raw = await invoke<string>("load_accounting_store");
-    if (!raw) return fallbackData;
+    if (!raw) return fb;
     const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
     return {
-      records: Array.isArray(parsed.records) ? parsed.records : fallbackData.records,
+      records: Array.isArray(parsed.records) ? parsed.records : fb.records,
       categories: Array.isArray(parsed.categories)
-        ? parsed.categories
-        : fallbackData.categories,
+        ? parsed.categories.map((c) => migrateCategory(c))
+        : fb.categories,
+      openingBalance:
+        typeof parsed.openingBalance === "number" &&
+        Number.isFinite(parsed.openingBalance)
+          ? parsed.openingBalance
+          : fb.openingBalance,
     };
   } catch {
-    return fallbackData;
+    return fb;
   }
 }
 
 async function saveAccountingData(data: PersistedAccountingData) {
   try {
-    await invoke("save_accounting_store", {
-      payload: JSON.stringify(data),
-    });
+    await invoke("save_accounting_store", { payload: JSON.stringify(data) });
   } catch {
-    // Browser-only preview keeps using localStorage fallback.
     saveFallbackJson(FALLBACK_STORAGE_KEY, data);
     saveFallbackJson(RECORDS_STORAGE_KEY, data.records);
     saveFallbackJson(CATEGORIES_STORAGE_KEY, data.categories);
+    saveFallbackJson(OPENING_BALANCE_STORAGE_KEY, data.openingBalance);
   }
 }
 
-function categoryTypeLabel(type: CategoryType) {
-  return type === "income" ? "收入" : "支出";
+function categoryTypeLabel(t: CategoryType) {
+  return t === "income" ? "收入" : "支出";
 }
 
 function parseCategoryType(value: unknown): CategoryType | null {
@@ -165,12 +291,16 @@ function parseCategoryType(value: unknown): CategoryType | null {
   return null;
 }
 
-function readExcelCell(row: ExcelRow, keys: string[]) {
+function parseShape(value: unknown): CatShape | null {
+  const t = String(value ?? "").trim().toLowerCase();
+  return (SHAPES as string[]).includes(t) ? (t as CatShape) : null;
+}
+
+function readExcelCell(row: ExcelRow, keys: string[]): unknown {
   for (const key of keys) {
     const value = row[key];
-    if (value !== undefined && value !== null && String(value).trim() !== "") {
+    if (value !== undefined && value !== null && String(value).trim() !== "")
       return value;
-    }
   }
   return "";
 }
@@ -180,214 +310,368 @@ function parseExcelAmount(value: unknown) {
   const cleaned = String(value ?? "")
     .replace(/[¥￥,\s]/g, "")
     .trim();
-  const amount = Number(cleaned);
-  return Number.isFinite(amount) ? amount : NaN;
+  const a = Number(cleaned);
+  return Number.isFinite(a) ? a : NaN;
 }
 
 function parseExcelRecordId(value: unknown, fallback: number) {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function parseExcelDate(value: unknown) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toISOString().slice(0, 10);
   }
-
   if (typeof value === "number" && Number.isFinite(value)) {
-    const parsed = XLSX.SSF.parse_date_code(value);
+    const parsed = (XLSX.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
+      .parse_date_code?.(value);
     if (parsed) {
       const month = String(parsed.m).padStart(2, "0");
       const day = String(parsed.d).padStart(2, "0");
       return `${parsed.y}-${month}-${day}`;
     }
   }
-
   const text = String(value ?? "").trim();
   if (!text) return "";
-
   const normalized = text.replace(/[./]/g, "-");
   const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!match) return "";
-
-  const [, year, month, day] = match;
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
 }
 
-function makeCategoryId(name: string, type: CategoryType, usedIds: Set<string>) {
+function makeCategoryId(name: string, type: CategoryType, used: Set<string>) {
   const slug = name
     .trim()
     .toLowerCase()
-    .replace(/[^\da-z\u4e00-\u9fa5]+/g, "-")
+    .replace(/[^\da-z一-龥]+/g, "-")
     .replace(/^-+|-+$/g, "");
   const base = `excel-${type}-${slug || "category"}`;
   let next = base;
-  let index = 1;
-
-  while (usedIds.has(next)) {
-    index += 1;
-    next = `${base}-${index}`;
+  let i = 1;
+  while (used.has(next)) {
+    i += 1;
+    next = `${base}-${i}`;
   }
-
-  usedIds.add(next);
+  used.add(next);
   return next;
 }
 
-function createInitialForm(categories: Category[], type: CategoryType = "expense"): RecordForm {
-  const category = categories.find((cat) => cat.type === type) ?? categories[0];
+function computeStats(records: RecordItem[], cats: Category[]): Stats {
+  const byId = new Map(cats.map((c) => [c.id, c]));
+  let income = 0;
+  let expense = 0;
+  const byCat: Record<string, number> = {};
+  const byDay: Record<string, number> = {};
+  const byMonth: Record<string, { income: number; expense: number }> = {};
+  for (const r of records) {
+    const cat = byId.get(r.catId);
+    if (!cat) continue;
+    if (cat.type === "income") income += r.amount;
+    else expense += r.amount;
+    byCat[r.catId] = (byCat[r.catId] || 0) + r.amount;
+    byDay[r.date] = (byDay[r.date] || 0) + (cat.type === "expense" ? r.amount : 0);
+    const m = r.date.slice(0, 7);
+    if (!byMonth[m]) byMonth[m] = { income: 0, expense: 0 };
+    byMonth[m][cat.type] += r.amount;
+  }
+  return { income, expense, balance: income - expense, byCat, byDay, byMonth };
+}
+
+function createInitialForm(
+  cats: Category[],
+  type: CategoryType = "expense",
+): RecordForm {
+  const cat = cats.find((c) => c.type === type) ?? cats[0];
   return {
-    type: category?.type ?? type,
-    catId: category?.id ?? DEFAULT_CATEGORIES[0].id,
+    type: cat?.type ?? type,
+    catId: cat?.id ?? DEFAULT_CATEGORIES[0].id,
     amount: "",
     date: today(),
     note: "",
   };
 }
 
+/* =================================================================
+   Atoms — CountUp, CatGlyph
+================================================================= */
+
+function CountUp({
+  value,
+  duration = 900,
+  prefix = "¥",
+  className = "",
+}: {
+  value: number;
+  duration?: number;
+  prefix?: string;
+  className?: string;
+}) {
+  const [shown, setShown] = useState(0);
+  const startedRef = useRef<number | null>(null);
+  const startValRef = useRef(0);
+  const targetRef = useRef(value);
+
+  useEffect(() => {
+    startedRef.current = null;
+    startValRef.current = shown;
+    targetRef.current = value;
+    let raf = 0;
+    const tick = (t: number) => {
+      if (startedRef.current == null) startedRef.current = t;
+      const p = Math.min(1, (t - startedRef.current) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const v =
+        startValRef.current +
+        (targetRef.current - startValRef.current) * eased;
+      setShown(v);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, duration]);
+
+  const [intPart, decPart] = splitMoney(shown);
+  return (
+    <span className={className}>
+      <span className="cu-prefix">{prefix}</span>
+      <span className="cu-int">{intPart}</span>
+      <span className="cu-dec">{decPart}</span>
+    </span>
+  );
+}
+
+function CatGlyph({
+  shape,
+  color,
+  size = 14,
+  className = "",
+}: {
+  shape: CatShape;
+  color: string;
+  size?: number;
+  className?: string;
+}) {
+  const s = size;
+  if (shape === "circle")
+    return (
+      <span
+        className={className}
+        style={{
+          width: s,
+          height: s,
+          borderRadius: "50%",
+          background: color,
+          display: "inline-block",
+          flexShrink: 0,
+        }}
+      />
+    );
+  if (shape === "diamond")
+    return (
+      <span
+        className={className}
+        style={{
+          width: s,
+          height: s,
+          background: color,
+          display: "inline-block",
+          transform: "rotate(45deg)",
+          flexShrink: 0,
+        }}
+      />
+    );
+  if (shape === "triangle")
+    return (
+      <span
+        className={className}
+        style={{
+          width: 0,
+          height: 0,
+          display: "inline-block",
+          borderLeft: `${s / 2}px solid transparent`,
+          borderRight: `${s / 2}px solid transparent`,
+          borderBottom: `${s}px solid ${color}`,
+          flexShrink: 0,
+        }}
+      />
+    );
+  if (shape === "halfcircle")
+    return (
+      <span
+        className={className}
+        style={{
+          width: s,
+          height: s / 2,
+          background: color,
+          display: "inline-block",
+          borderRadius: `${s}px ${s}px 0 0`,
+          flexShrink: 0,
+        }}
+      />
+    );
+  return (
+    <span
+      className={className}
+      style={{
+        width: s,
+        height: s,
+        background: color,
+        display: "inline-block",
+        borderRadius: 2,
+        flexShrink: 0,
+      }}
+    />
+  );
+}
+
+/* =================================================================
+   App
+================================================================= */
+
 function App() {
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [openingBalance, setOpeningBalance] = useState<number>(
+    DEFAULT_OPENING_BALANCE,
+  );
   const [storageLoaded, setStorageLoaded] = useState(false);
-  const [tab, setTab] = useState<TabKey>("dashboard");
+  const [page, setPage] = useState<PageKey>("ledger");
   const [modalOpen, setModalOpen] = useState(false);
-  const [pendingDeleteRecord, setPendingDeleteRecord] = useState<RecordItem | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
-  const [filter, setFilter] = useState<FilterState>({
-    type: "all",
-    cat: "all",
-    month: "",
-  });
+  const [form, setForm] = useState<RecordForm>(() =>
+    createInitialForm(DEFAULT_CATEGORIES),
+  );
+  const [pendingDelete, setPendingDelete] = useState<RecordItem | null>(null);
+  const [entryFilter, setEntryFilter] = useState<EntryFilter>("all");
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({
     type: "idle",
     message: "",
   });
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  const [form, setForm] = useState<RecordForm>(() => createInitialForm(DEFAULT_CATEGORIES));
-  const [catForm, setCatForm] = useState<CategoryForm>({
-    name: "",
-    type: "expense",
-  });
 
+  /* ---- load on mount ---- */
   useEffect(() => {
     let cancelled = false;
-
     loadAccountingData()
       .then((data) => {
         if (cancelled) return;
-        setRecords(data.records);
-        setCategories(data.categories.length > 0 ? data.categories : DEFAULT_CATEGORIES);
+        const seeded = window.localStorage.getItem(FIRST_RUN_KEY);
+        if (!seeded && data.records.length === 0) {
+          setRecords(SAMPLE_RECORDS);
+          setCategories(DEFAULT_CATEGORIES);
+          setOpeningBalance(data.openingBalance);
+          try {
+            window.localStorage.setItem(FIRST_RUN_KEY, "1");
+          } catch {
+            /* ignore */
+          }
+        } else {
+          setRecords(data.records);
+          setCategories(
+            data.categories.length > 0 ? data.categories : DEFAULT_CATEGORIES,
+          );
+          setOpeningBalance(data.openingBalance);
+        }
         setStorageLoaded(true);
       })
       .catch(() => {
-        if (cancelled) return;
-        setStorageLoaded(true);
+        if (!cancelled) setStorageLoaded(true);
       });
-
     return () => {
       cancelled = true;
     };
   }, []);
 
+  /* ---- persist ---- */
   useEffect(() => {
     if (!storageLoaded) return;
-    void saveAccountingData({ records, categories });
-  }, [records, categories, storageLoaded]);
+    void saveAccountingData({ records, categories, openingBalance });
+  }, [records, categories, openingBalance, storageLoaded]);
 
+  /* ---- derived ---- */
   const getCat = (id: string): Category =>
-    categories.find((cat) => cat.id === id) ?? {
+    categories.find((c) => c.id === id) ?? {
       id: "unknown",
-      name: "未知分类",
+      name: "未分类",
       type: "expense",
+      shape: "square",
+      swatch: "#999",
     };
 
-  const sortedRecords = useMemo(() => {
-    return records
-      .slice()
-      .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-  }, [records]);
+  const sortedRecords = useMemo(
+    () =>
+      records
+        .slice()
+        .sort(
+          (a, b) =>
+            b.date.localeCompare(a.date) || b.id - a.id,
+        ),
+    [records],
+  );
 
-  const filteredRecords = useMemo(() => {
-    return sortedRecords.filter((record) => {
-      const category = getCat(record.catId);
-      if (filter.type !== "all" && category.type !== filter.type) return false;
-      if (filter.cat !== "all" && record.catId !== filter.cat) return false;
-      if (filter.month && !record.date.startsWith(filter.month)) return false;
+  const stats = useMemo(
+    () => computeStats(records, categories),
+    [records, categories],
+  );
+
+  const filteredEntries = useMemo(() => {
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    return sortedRecords.filter((r) => {
+      const c = getCat(r.catId);
+      if (entryFilter === "all") return true;
+      if (entryFilter === "expense") return c.type === "expense";
+      if (entryFilter === "income") return c.type === "income";
+      if (entryFilter === "month") return r.date.startsWith(month);
       return true;
     });
-  }, [sortedRecords, filter, categories]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedRecords, entryFilter, categories]);
 
-  const stats = useMemo<Stats>(() => {
-    const income = records
-      .filter((record) => getCat(record.catId).type === "income")
-      .reduce((sum, record) => sum + record.amount, 0);
-    const expense = records
-      .filter((record) => getCat(record.catId).type === "expense")
-      .reduce((sum, record) => sum + record.amount, 0);
-    const byCategory: Record<string, number> = {};
-
-    records.forEach((record) => {
-      byCategory[record.catId] = (byCategory[record.catId] || 0) + record.amount;
-    });
-
-    return { income, expense, balance: income - expense, byCategory };
-  }, [records, categories]);
-
-  const months = useMemo(() => {
-    return [...new Set(records.map((record) => record.date.slice(0, 7)))]
-      .sort()
-      .reverse();
-  }, [records]);
-
-  const categoryStats = useMemo(() => {
-    return categories
-      .map((category) => ({
-        category,
-        amount: stats.byCategory[category.id] || 0,
-      }))
-      .filter((item) => item.amount > 0)
-      .sort((a, b) => b.amount - a.amount);
-  }, [categories, stats.byCategory]);
-
-  function openAddModal() {
-    setForm(createInitialForm(categories));
+  /* ---- actions ---- */
+  function openAddModal(type: CategoryType = "expense") {
+    setForm(createInitialForm(categories, type));
     setEditId(null);
     setModalOpen(true);
   }
 
   function openEditModal(record: RecordItem) {
-    const category = getCat(record.catId);
+    const cat = getCat(record.catId);
     setForm({
-      type: category.type,
+      type: cat.type,
       catId: record.catId,
       amount: String(record.amount),
       date: record.date,
-      note: record.note || "",
+      note: record.note ?? "",
     });
     setEditId(record.id);
     setModalOpen(true);
   }
 
-  function resetForm(type: CategoryType = "expense") {
-    setForm(createInitialForm(categories, type));
+  function closeModal() {
+    setModalOpen(false);
     setEditId(null);
   }
 
   function saveRecord() {
     const amount = Number(form.amount);
-    if (!form.catId || !form.amount || Number.isNaN(amount) || amount <= 0) return;
+    if (!form.catId || !form.amount || !Number.isFinite(amount) || amount <= 0)
+      return;
 
     if (editId !== null) {
       setRecords((items) =>
-        items.map((record) =>
-          record.id === editId
+        items.map((r) =>
+          r.id === editId
             ? {
-                ...record,
+                ...r,
                 catId: form.catId,
                 amount,
                 date: form.date,
                 note: form.note.trim(),
               }
-            : record,
+            : r,
         ),
       );
     } else {
@@ -402,80 +686,51 @@ function App() {
         },
       ]);
     }
-
-    setModalOpen(false);
-    resetForm(form.type);
+    closeModal();
   }
 
-  function saveQuickRecord() {
-    const amount = Number(form.amount);
-    if (!form.catId || !form.amount || Number.isNaN(amount) || amount <= 0) return;
-
-    setRecords((items) => [
-      ...items,
-      {
-        id: Date.now(),
-        catId: form.catId,
-        amount,
-        date: form.date,
-        note: form.note.trim(),
-      },
-    ]);
-    resetForm(form.type);
+  function confirmDelete() {
+    if (!pendingDelete) return;
+    setRecords((items) => items.filter((r) => r.id !== pendingDelete.id));
+    setPendingDelete(null);
   }
 
-  function deleteRecord(id: number) {
-    const record = records.find((item) => item.id === id);
-    if (!record) return;
-
-    setPendingDeleteRecord(record);
-  }
-
-  function confirmDeleteRecord() {
-    if (!pendingDeleteRecord) return;
-    setRecords((items) => items.filter((record) => record.id !== pendingDeleteRecord.id));
-    setPendingDeleteRecord(null);
-  }
-
-  function addCategory() {
-    const name = catForm.name.trim();
-    if (!name) return;
-
+  function addCategory(c: Omit<Category, "id">) {
+    const trimmed = c.name.trim();
+    if (!trimmed) return;
     setCategories((items) => [
       ...items,
-      {
-        id: `custom-${Date.now()}`,
-        name,
-        type: catForm.type,
-      },
+      { ...c, name: trimmed, id: `custom-${Date.now()}` },
     ]);
-    setCatForm({ name: "", type: "expense" });
   }
 
   function deleteCategory(id: string) {
-    if (DEFAULT_CATEGORIES.some((category) => category.id === id)) return;
-    setCategories((items) => items.filter((category) => category.id !== id));
-    setRecords((items) => items.filter((record) => record.catId !== id));
+    if (DEFAULT_CATEGORIES.some((c) => c.id === id)) return;
+    setCategories((items) => items.filter((c) => c.id !== id));
+    setRecords((items) => items.filter((r) => r.catId !== id));
   }
 
+  /* ---- backup ---- */
   async function exportBackup() {
     const recordRows = sortedRecords.map((record) => {
-      const category = getCat(record.catId);
+      const c = getCat(record.catId);
       return {
         记录ID: record.id,
         日期: record.date,
-        类型: categoryTypeLabel(category.type),
-        分类: category.name,
+        类型: categoryTypeLabel(c.type),
+        分类: c.name,
         金额: record.amount,
         备注: record.note ?? "",
       };
     });
-    const categoryRows = categories.map((category) => ({
-      分类ID: category.id,
-      分类名称: category.name,
-      类型: categoryTypeLabel(category.type),
+    const categoryRows = categories.map((c) => ({
+      分类ID: c.id,
+      分类名称: c.name,
+      类型: categoryTypeLabel(c.type),
+      形状: c.shape,
+      颜色: c.swatch,
     }));
-    const summaryRows = [
+    const summaryRows: (string | number)[][] = [
       ["指标", "金额"],
       ["总余额", stats.balance],
       ["总收入", stats.income],
@@ -483,7 +738,8 @@ function App() {
       ["记录数量", records.length],
       ["分类数量", categories.length],
     ];
-    const workbook = XLSX.utils.book_new();
+
+    const wb = XLSX.utils.book_new();
     const recordSheet = XLSX.utils.json_to_sheet(recordRows, {
       header: EXCEL_RECORD_HEADERS,
     });
@@ -491,7 +747,6 @@ function App() {
       header: EXCEL_CATEGORY_HEADERS,
     });
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
-
     recordSheet["!cols"] = [
       { wch: 16 },
       { wch: 12 },
@@ -500,30 +755,37 @@ function App() {
       { wch: 12 },
       { wch: 24 },
     ];
-    categorySheet["!cols"] = [{ wch: 24 }, { wch: 16 }, { wch: 10 }];
+    categorySheet["!cols"] = [
+      { wch: 24 },
+      { wch: 16 },
+      { wch: 10 },
+      { wch: 12 },
+      { wch: 12 },
+    ];
     summarySheet["!cols"] = [{ wch: 14 }, { wch: 14 }];
-
-    XLSX.utils.book_append_sheet(workbook, recordSheet, EXCEL_RECORD_SHEET);
-    XLSX.utils.book_append_sheet(workbook, categorySheet, EXCEL_CATEGORY_SHEET);
-    XLSX.utils.book_append_sheet(workbook, summarySheet, EXCEL_SUMMARY_SHEET);
-    const filename = `wangyuan-accounting-${today()}.xlsx`;
+    XLSX.utils.book_append_sheet(wb, recordSheet, EXCEL_RECORD_SHEET);
+    XLSX.utils.book_append_sheet(wb, categorySheet, EXCEL_CATEGORY_SHEET);
+    XLSX.utils.book_append_sheet(wb, summarySheet, EXCEL_SUMMARY_SHEET);
+    const filename = `wangyuan-${today()}.xlsx`;
 
     try {
-      const content = XLSX.write(workbook, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+      const content = XLSX.write(wb, {
+        bookType: "xlsx",
+        type: "array",
+      }) as ArrayBuffer;
       const path = await invoke<string>("save_excel_backup", {
         filename,
         bytes: Array.from(new Uint8Array(content)),
       });
-
       setBackupStatus({
         type: "success",
-        message: `已导出 ${records.length} 条记录：${path}`,
+        message: `已导出 ${records.length} 条记录到 ${path}`,
       });
     } catch {
-      XLSX.writeFile(workbook, filename);
+      XLSX.writeFile(wb, filename);
       setBackupStatus({
         type: "success",
-        message: `已导出 ${records.length} 条记录到 Excel。`,
+        message: `已导出 ${records.length} 条记录到 ${filename}`,
       });
     }
   }
@@ -532,80 +794,101 @@ function App() {
     importInputRef.current?.click();
   }
 
-  async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-
+  async function importFromFile(file: File) {
     try {
       const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data, { cellDates: true });
+      const wb = XLSX.read(data, { cellDates: true });
       const recordSheet =
-        workbook.Sheets[EXCEL_RECORD_SHEET] ??
-        workbook.Sheets[workbook.SheetNames[0]];
-
+        wb.Sheets[EXCEL_RECORD_SHEET] ?? wb.Sheets[wb.SheetNames[0]];
       if (!recordSheet) {
-        setBackupStatus({ type: "error", message: "导入失败：Excel 中没有可读取的工作表。" });
+        setBackupStatus({
+          type: "error",
+          message: "导入失败：Excel 中没有可读取的工作表",
+        });
         return;
       }
 
-      const usedCategoryIds = new Set<string>();
-      const importedCategories: Category[] = [];
-      const categoryByKey = new Map<string, Category>();
-      const categorySheet = workbook.Sheets[EXCEL_CATEGORY_SHEET];
+      const usedIds = new Set<string>();
+      const importedCats: Category[] = [];
+      const catByKey = new Map<string, Category>();
+      const catSheet = wb.Sheets[EXCEL_CATEGORY_SHEET];
 
-      if (categorySheet) {
-        const categoryRows = XLSX.utils.sheet_to_json<ExcelRow>(categorySheet, { defval: "" });
-        categoryRows.forEach((row) => {
-          const name = String(readExcelCell(row, ["分类名称", "分类", "name"])).trim();
-          const type = parseCategoryType(readExcelCell(row, ["类型", "收支类型", "type"]));
+      if (catSheet) {
+        const rows = XLSX.utils.sheet_to_json<ExcelRow>(catSheet, {
+          defval: "",
+        });
+        rows.forEach((row, idx) => {
+          const name = String(
+            readExcelCell(row, ["分类名称", "分类", "name"]),
+          ).trim();
+          const type = parseCategoryType(
+            readExcelCell(row, ["类型", "收支类型", "type"]),
+          );
           if (!name || !type) return;
-
           const rawId = String(readExcelCell(row, ["分类ID", "id"])).trim();
-          const id = rawId && !usedCategoryIds.has(rawId)
-            ? rawId
-            : makeCategoryId(name, type, usedCategoryIds);
-          usedCategoryIds.add(id);
-
-          const category = { id, name, type };
-          importedCategories.push(category);
-          categoryByKey.set(`${type}:${name}`, category);
+          const id =
+            rawId && !usedIds.has(rawId)
+              ? rawId
+              : makeCategoryId(name, type, usedIds);
+          usedIds.add(id);
+          const shape =
+            parseShape(readExcelCell(row, ["形状", "shape"])) ??
+            SHAPES[idx % SHAPES.length];
+          const swatchRaw = String(
+            readExcelCell(row, ["颜色", "color", "swatch"]),
+          ).trim();
+          const swatch = /^#([\da-f]{3}|[\da-f]{6})$/i.test(swatchRaw)
+            ? swatchRaw
+            : PALETTE[idx % PALETTE.length];
+          const cat: Category = { id, name, type, shape, swatch };
+          importedCats.push(cat);
+          catByKey.set(`${type}:${name}`, cat);
         });
       }
 
-      const recordRows = XLSX.utils.sheet_to_json<ExcelRow>(recordSheet, { defval: "" });
+      const recordRows = XLSX.utils.sheet_to_json<ExcelRow>(recordSheet, {
+        defval: "",
+      });
       let skipped = 0;
-      const importedRecords = recordRows.reduce<RecordItem[]>((items, row, index) => {
+      const importedRecords = recordRows.reduce<RecordItem[]>((items, row, idx) => {
         const rawAmount = parseExcelAmount(readExcelCell(row, ["金额", "amount"]));
-        const typeFromCell = parseCategoryType(readExcelCell(row, ["类型", "收支类型", "type"]));
+        const typeFromCell = parseCategoryType(
+          readExcelCell(row, ["类型", "收支类型", "type"]),
+        );
         const type = typeFromCell ?? (rawAmount < 0 ? "expense" : "income");
-        const categoryName = String(readExcelCell(row, ["分类", "分类名称", "category"])).trim();
+        const categoryName = String(
+          readExcelCell(row, ["分类", "分类名称", "category"]),
+        ).trim();
         const date = parseExcelDate(readExcelCell(row, ["日期", "date"]));
         const amount = Math.abs(rawAmount);
-
-        if (!categoryName || !date || !Number.isFinite(amount) || amount <= 0) {
+        if (
+          !categoryName ||
+          !date ||
+          !Number.isFinite(amount) ||
+          amount <= 0
+        ) {
           skipped += 1;
           return items;
         }
-
-        const categoryKey = `${type}:${categoryName}`;
-        let category = categoryByKey.get(categoryKey);
-        if (!category) {
-          category = {
-            id: makeCategoryId(categoryName, type, usedCategoryIds),
+        const key = `${type}:${categoryName}`;
+        let cat = catByKey.get(key);
+        if (!cat) {
+          cat = {
+            id: makeCategoryId(categoryName, type, usedIds),
             name: categoryName,
             type,
+            shape: SHAPES[importedCats.length % SHAPES.length],
+            swatch: PALETTE[importedCats.length % PALETTE.length],
           };
-          importedCategories.push(category);
-          categoryByKey.set(categoryKey, category);
+          importedCats.push(cat);
+          catByKey.set(key, cat);
         }
-
         items.push({
           id: parseExcelRecordId(
             readExcelCell(row, ["记录ID", "id"]),
-            Date.now() + index,
+            Date.now() + idx,
           ),
-          catId: category.id,
+          catId: cat.id,
           amount,
           date,
           note: String(readExcelCell(row, ["备注", "note"])).trim(),
@@ -614,782 +897,1835 @@ function App() {
       }, []);
 
       if (importedRecords.length === 0) {
-        setBackupStatus({ type: "error", message: "导入失败：Excel 中没有有效的收支记录。" });
+        setBackupStatus({
+          type: "error",
+          message: "导入失败：Excel 中没有有效的收支记录",
+        });
         return;
       }
 
-      const confirmed = window.confirm(
-        `导入 Excel 会覆盖当前 ${records.length} 条记录和 ${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录吗？`,
+      const ok = window.confirm(
+        `导入会覆盖当前 ${records.length} 条记录、${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录？`,
       );
-      if (!confirmed) {
+      if (!ok) {
         setBackupStatus({ type: "idle", message: "" });
         return;
       }
-
       setRecords(importedRecords);
-      setCategories(importedCategories);
+      setCategories(importedCats.length > 0 ? importedCats : DEFAULT_CATEGORIES);
       setBackupStatus({
         type: "success",
-        message: `已导入 ${importedRecords.length} 条记录${skipped > 0 ? `，跳过 ${skipped} 行` : ""}。`,
+        message: `已导入 ${importedRecords.length} 条记录${
+          skipped > 0 ? ` · 跳过 ${skipped} 行` : ""
+        }`,
       });
     } catch {
-      setBackupStatus({ type: "error", message: "导入失败：无法读取 Excel 文件。" });
+      setBackupStatus({
+        type: "error",
+        message: "导入失败：无法读取 Excel 文件",
+      });
     }
   }
 
+  async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    await importFromFile(file);
+  }
+
+  /* =================================================================
+     Render
+  ================================================================= */
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">账</div>
-          <div>
-            <div className="brand-name">王源专属记账工作台</div>
-          </div>
-        </div>
+    <div className="v2-root">
+      <TopBar
+        page={page}
+        onPage={setPage}
+        onAdd={() => openAddModal("expense")}
+      />
 
-        <nav className="nav-list" aria-label="主导航">
-          {(
-            [
-              ["dashboard", "总览", "余额、近期记录"],
-              ["records", "明细", "筛选和编辑"],
-              ["stats", "统计", "分类占比"],
-              ["cats", "分类", "自定义收支"],
-            ] as const
-          ).map(([key, label, helper]) => (
-            <button
-              className={`nav-item ${tab === key ? "active" : ""}`}
-              key={key}
-              onClick={() => setTab(key)}
-              type="button"
-            >
-              <span>{label}</span>
-              <small>{helper}</small>
-            </button>
-          ))}
-        </nav>
-
-        <div className="sidebar-balance">
-          <span>当前结余</span>
-          <strong>{formatMoney(stats.balance)}</strong>
-        </div>
-      </aside>
-
-      <main className="main-panel">
-        <section className="hero-panel">
-          <div>
-            <h1>财务总览</h1>
-            <p>记录收入、支出和分类趋势，数据保存在本机。</p>
-          </div>
-          <button className="primary-action" onClick={openAddModal} type="button">
-            新增记录
-          </button>
-        </section>
-
-        <section className="metric-grid" aria-label="财务指标">
-          <MetricCard label="总余额" value={formatMoney(stats.balance)} tone="balance" />
-          <MetricCard label="总收入" value={formatMoney(stats.income)} tone="income" />
-          <MetricCard label="总支出" value={formatMoney(stats.expense)} tone="expense" />
-        </section>
-
-        <section className="content-panel">
-          {tab === "dashboard" && (
-            <DashboardView
-              records={sortedRecords}
-              categoryStats={categoryStats}
-              stats={stats}
-              getCat={getCat}
-            />
-          )}
-
-          {tab === "records" && (
-            <RecordsView
-              records={filteredRecords}
-              categories={categories}
-              filter={filter}
-              months={months}
-              getCat={getCat}
-              setFilter={setFilter}
-              onEdit={openEditModal}
-              onDelete={deleteRecord}
-            />
-          )}
-
-          {tab === "stats" && (
-            <StatsView categoryStats={categoryStats} stats={stats} />
-          )}
-
-          {tab === "cats" && (
-            <CategoriesView
-              categories={categories}
-              catForm={catForm}
-              setCatForm={setCatForm}
-              onAdd={addCategory}
-              onDelete={deleteCategory}
-            />
-          )}
-        </section>
-      </main>
-
-      <aside className="right-panel">
-        <QuickEntry
+      {page === "ledger" && (
+        <LedgerPage
+          records={records}
+          filtered={filteredEntries}
+          stats={stats}
           categories={categories}
-          form={form}
-          setForm={setForm}
-          onSave={saveQuickRecord}
+          getCat={getCat}
+          entryFilter={entryFilter}
+          setEntryFilter={setEntryFilter}
+          onEdit={openEditModal}
+          onDelete={(r) => setPendingDelete(r)}
+          openingBalance={openingBalance}
+          onOpeningBalance={setOpeningBalance}
         />
+      )}
 
-        <BackupPanel
+      {page === "stats" && (
+        <StatsPage
+          records={records}
+          stats={stats}
+          categories={categories}
+        />
+      )}
+
+      {page === "cats" && (
+        <CategoriesPage
+          categories={categories}
+          stats={stats}
+          records={records}
+          onAdd={addCategory}
+          onDelete={deleteCategory}
+        />
+      )}
+
+      {page === "backup" && (
+        <BackupPage
+          records={records}
+          categories={categories}
           status={backupStatus}
           onExport={exportBackup}
           onImport={openImportPicker}
-          importInputRef={importInputRef}
-          onImportFile={importBackup}
+          onImportFile={importFromFile}
         />
+      )}
 
-        <section className="side-card">
-          <div className="side-card-heading">
-            <h2>最近记录</h2>
-            <span>{records.length} 条</span>
-          </div>
-          <div className="mini-list">
-            {sortedRecords.slice(0, 5).map((record) => (
-              <MiniRecord key={record.id} record={record} category={getCat(record.catId)} />
-            ))}
-            {sortedRecords.length === 0 && <EmptyState text="暂无记录" compact />}
-          </div>
-        </section>
-      </aside>
-
-      <button className="floating-action" onClick={openAddModal} type="button" aria-label="新增记录">
-        +
-      </button>
+      <input
+        ref={importInputRef}
+        className="v2-file-input-hidden"
+        type="file"
+        accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+        onChange={importBackup}
+      />
 
       {modalOpen && (
-        <div className="modal-backdrop" onClick={() => setModalOpen(false)}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <div>
-                <h2>{editId !== null ? "编辑记录" : "新增记录"}</h2>
-                <p>选择分类、金额和日期后保存。</p>
-              </div>
-              <button className="icon-button" onClick={() => setModalOpen(false)} type="button">
-                ×
-              </button>
-            </div>
-            <RecordFormFields categories={categories} form={form} setForm={setForm} />
-            <button className="submit-button" onClick={saveRecord} type="button">
-              {editId !== null ? "保存修改" : "确认记账"}
-            </button>
-          </div>
-        </div>
+        <NewRecordModal
+          form={form}
+          setForm={setForm}
+          categories={categories}
+          isEdit={editId !== null}
+          onClose={closeModal}
+          onSave={saveRecord}
+        />
       )}
 
-      {pendingDeleteRecord && (
-        <div className="modal-backdrop" onClick={() => setPendingDeleteRecord(null)}>
-          <div className="modal-card delete-confirm-card" onClick={(event) => event.stopPropagation()}>
-            <div className="delete-confirm-icon" aria-hidden="true">
-              !
-            </div>
-            <div className="delete-confirm-copy">
-              <h2>确认删除这条记录？</h2>
-              <p>删除后会立即从本地数据中移除，无法在应用内撤回。</p>
-            </div>
-            <dl className="delete-record-summary">
-              <div>
-                <dt>分类</dt>
-                <dd>{getCat(pendingDeleteRecord.catId).name}</dd>
-              </div>
-              <div>
-                <dt>金额</dt>
-                <dd>{formatMoney(pendingDeleteRecord.amount)}</dd>
-              </div>
-              <div>
-                <dt>日期</dt>
-                <dd>{pendingDeleteRecord.date}</dd>
-              </div>
-            </dl>
-            <div className="delete-confirm-actions">
-              <button type="button" onClick={() => setPendingDeleteRecord(null)}>
-                取消
-              </button>
-              <button className="danger" type="button" onClick={confirmDeleteRecord}>
-                确认删除
-              </button>
-            </div>
-          </div>
-        </div>
+      {pendingDelete && (
+        <DeleteConfirmModal
+          record={pendingDelete}
+          category={getCat(pendingDelete.catId)}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
       )}
     </div>
   );
 }
 
-function MetricCard({
-  label,
+/* =================================================================
+   TopBar
+================================================================= */
+function TopBar({
+  page,
+  onPage,
+  onAdd,
+}: {
+  page: PageKey;
+  onPage: (p: PageKey) => void;
+  onAdd: () => void;
+}) {
+  return (
+    <header className="v2-top">
+      <div className="v2-brand">
+        <div className="v2-brand-logo">
+          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+            <rect
+              x="3"
+              y="3"
+              width="26"
+              height="26"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            />
+            <rect x="9" y="9" width="14" height="14" fill="currentColor" />
+          </svg>
+        </div>
+        <div>
+          <div className="v2-brand-name">书 业 账 房</div>
+          <div className="v2-brand-sub mono">CHRONICLE BOOKS · LEDGER 2026</div>
+        </div>
+      </div>
+      <nav className="v2-nav" aria-label="主导航">
+        {(
+          [
+            ["ledger", "账目"],
+            ["stats", "统计"],
+            ["cats", "分类"],
+            ["backup", "备份"],
+          ] as const
+        ).map(([k, l]) => (
+          <button
+            key={k}
+            className={page === k ? "active" : ""}
+            onClick={() => onPage(k)}
+            type="button"
+          >
+            {l}
+          </button>
+        ))}
+      </nav>
+      <div className="v2-top-actions">
+        <button className="v2-btn-ghost mono" type="button" aria-label="快捷搜索">
+          ⌘ K
+        </button>
+        <button className="v2-btn-primary" type="button" onClick={onAdd}>
+          + 记一笔
+        </button>
+      </div>
+    </header>
+  );
+}
+
+/* =================================================================
+   Greeting
+================================================================= */
+function GreetingStrip({
+  date,
+  todayExpense,
+  weekNet,
+  recordedToday,
+  note,
+}: {
+  date: Date;
+  todayExpense: number;
+  weekNet: number;
+  recordedToday: number;
+  note: string;
+}) {
+  const dateText = date.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  return (
+    <div className="v2-greet">
+      <div className="v2-greet-l">
+        <div className="v2-greet-time mono">
+          {dateText} · 周{weekdayCN(date)}
+        </div>
+        <div className="v2-greet-hi">
+          {timeGreeting(date).split("").join(" ")}，
+          <span className="v2-greet-name">王 源</span>
+        </div>
+        <div className="v2-greet-sub">
+          今日已记 {recordedToday} 笔 · 距月末{" "}
+          {(() => {
+            const last = new Date(
+              date.getFullYear(),
+              date.getMonth() + 1,
+              0,
+            ).getDate();
+            return Math.max(0, last - date.getDate());
+          })()}{" "}
+          日 · {note}
+        </div>
+      </div>
+      <div className="v2-greet-r">
+        <div className="v2-greet-stat">
+          <div className="mono">今日支出</div>
+          <div className="v2-greet-num">{fmtMoney(todayExpense)}</div>
+        </div>
+        <div className="v2-greet-stat">
+          <div className="mono">本周净流入</div>
+          <div className={`v2-greet-num ${weekNet >= 0 ? "positive" : ""}`}>
+            {weekNet >= 0 ? "+" : "−"}
+            {fmtMoney(Math.abs(weekNet), 0).replace("¥", "¥")}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =================================================================
+   Opening balance row (editable)
+================================================================= */
+function OpeningBalanceRow({
   value,
-  tone,
+  onChange,
 }: {
-  label: string;
-  value: string;
-  tone: "balance" | "income" | "expense";
+  value: number;
+  onChange: (n: number) => void;
 }) {
-  return (
-    <article className={`metric-card ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  );
-}
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(value));
 
-function DashboardView({
-  records,
-  categoryStats,
-  stats,
-  getCat,
-}: {
-  records: RecordItem[];
-  categoryStats: { category: Category; amount: number }[];
-  stats: Stats;
-  getCat: (id: string) => Category;
-}) {
-  return (
-    <div className="dashboard-grid">
-      <section className="panel-block wide">
-        <PanelHeader title="近期记录" description="最近 10 条收支动态" />
-        <RecordTable records={records.slice(0, 10)} getCat={getCat} />
-      </section>
+  function commit() {
+    const n = Number(draft.replace(/[^\d.-]/g, ""));
+    if (Number.isFinite(n)) onChange(n);
+    setEditing(false);
+  }
 
-      <section className="panel-block">
-        <PanelHeader title="分类排行" description="按金额排序" />
-        <CategoryBars items={categoryStats} income={stats.income} expense={stats.expense} />
-      </section>
+  if (editing) {
+    return (
+      <div className="v2-rec-row">
+        <span className="mono">期 初</span>
+        <input
+          autoFocus
+          className="v2-rec-edit mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") {
+              setDraft(String(value));
+              setEditing(false);
+            }
+          }}
+          inputMode="decimal"
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      className="v2-rec-row v2-rec-editable"
+      onClick={() => {
+        setDraft(String(value));
+        setEditing(true);
+      }}
+      role="button"
+      tabIndex={0}
+      title="点击编辑期初余额"
+    >
+      <span className="mono">期 初</span>
+      <span className="v2-rec-num mono">{fmtMoney(value).slice(1)}</span>
     </div>
   );
 }
 
-function RecordsView({
+/* =================================================================
+   Ledger (main) page
+================================================================= */
+function LedgerPage({
   records,
+  filtered,
+  stats,
   categories,
-  filter,
-  months,
   getCat,
-  setFilter,
+  entryFilter,
+  setEntryFilter,
   onEdit,
   onDelete,
+  openingBalance,
+  onOpeningBalance,
 }: {
   records: RecordItem[];
+  filtered: RecordItem[];
+  stats: Stats;
   categories: Category[];
-  filter: FilterState;
-  months: string[];
   getCat: (id: string) => Category;
-  setFilter: React.Dispatch<React.SetStateAction<FilterState>>;
-  onEdit: (record: RecordItem) => void;
-  onDelete: (id: number) => void;
+  entryFilter: EntryFilter;
+  setEntryFilter: (f: EntryFilter) => void;
+  onEdit: (r: RecordItem) => void;
+  onDelete: (r: RecordItem) => void;
+  openingBalance: number;
+  onOpeningBalance: (n: number) => void;
 }) {
+  const now = new Date();
+  const todayKey = now.toISOString().slice(0, 10);
+  const todayExpense = records
+    .filter((r) => r.date === todayKey && getCat(r.catId).type === "expense")
+    .reduce((s, r) => s + r.amount, 0);
+
+  // last 7 days net
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - 6);
+  const weekRecords = records.filter((r) => new Date(r.date) >= weekStart);
+  const weekNet = weekRecords.reduce((s, r) => {
+    const c = getCat(r.catId);
+    return c.type === "income" ? s + r.amount : s - r.amount;
+  }, 0);
+  const recordedToday = records.filter((r) => r.date === todayKey).length;
+
+  // 6-month series — covers up to latest activity month (handles future-dated records)
+  const monthSeq = buildMonthSeq(records, now);
+  const allMonthVals = monthSeq.flatMap((m) => {
+    const v = stats.byMonth[m] ?? { income: 0, expense: 0 };
+    return [v.income, v.expense];
+  });
+  const maxMonthVal = Math.max(...allMonthVals, 1);
+
+  // MoM change — compare the last two months in the sequence
+  const curKey = monthSeq[5];
+  const prevKey = monthSeq[4];
+  const cur = stats.byMonth[curKey] ?? { income: 0, expense: 0 };
+  const prev = stats.byMonth[prevKey] ?? { income: 0, expense: 0 };
+  const curNet = cur.income - cur.expense;
+  const prevNet = prev.income - prev.expense;
+  const hasPrev = prev.income > 0 || prev.expense > 0;
+  const momPct =
+    hasPrev && prevNet !== 0
+      ? ((curNet - prevNet) / Math.abs(prevNet)) * 100
+      : null;
+
+  // Real "近半年" trend note based on current calendar month vs prior 5 months
+  const trendNote = (() => {
+    const cmKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const cm = stats.byMonth[cmKey];
+    if (!cm || (cm.income === 0 && cm.expense === 0)) {
+      return "本月暂无记录 · 开始记一笔";
+    }
+    const cmNet = cm.income - cm.expense;
+    const prevNets: number[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const v = stats.byMonth[key];
+      if (v && (v.income !== 0 || v.expense !== 0)) {
+        prevNets.push(v.income - v.expense);
+      }
+    }
+    if (prevNets.length === 0) return "本月节余暂无历史可比";
+    const maxPrev = Math.max(...prevNets);
+    const minPrev = Math.min(...prevNets);
+    if (cmNet > maxPrev) return "本月节余创近半年新高";
+    if (cmNet < minPrev) return "本月节余为近半年新低";
+    if (cmNet >= 0)
+      return `本月节余 ${fmtCompact(cmNet)} · 近半年区间 ${fmtCompact(minPrev)} ~ ${fmtCompact(maxPrev)}`;
+    return `本月入不敷出 · 缺口 ${fmtCompact(Math.abs(cmNet))}`;
+  })();
+
+  // donut data
+  const expenseCats = categories
+    .filter((c) => c.type === "expense" && (stats.byCat[c.id] || 0) > 0)
+    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
+    .sort((a, b) => b.amount - a.amount);
+  const totalExp = expenseCats.reduce((s, c) => s + c.amount, 0) || 1;
+
+  // heatmap — last 42 days ending today
+  const heatDays: { date: string; value: number }[] = [];
+  for (let i = 41; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(now.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    heatDays.push({ date: key, value: stats.byDay[key] || 0 });
+  }
+  const maxHeat = Math.max(...heatDays.map((d) => d.value), 1);
+
+  // receipt rail summary
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const monthData = stats.byMonth[monthKey] ?? { income: 0, expense: 0 };
+  const monthBalance = monthData.income - monthData.expense;
+  const stampDate = `${now.getFullYear()} / ${String(now.getMonth() + 1).padStart(2, "0")} / ${String(now.getDate()).padStart(2, "0")}`;
+  const stampTime = now.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+
   return (
-    <section className="panel-block">
-      <div className="records-toolbar">
-        <PanelHeader title="收支明细" description="筛选、编辑或删除记录" />
-        <div className="filter-row">
-          <CustomSelect
-            label="全部类型"
-            value={filter.type}
-            options={[
-              { value: "all", label: "全部类型" },
-              { value: "expense", label: "支出" },
-              { value: "income", label: "收入" },
-            ]}
-            onChange={(type) => setFilter((value) => ({ ...value, type }))}
-          />
-          <CustomSelect
-            label="全部分类"
-            value={filter.cat}
-            options={[
-              { value: "all", label: "全部分类" },
-              ...categories.map((category) => ({
-                value: category.id,
-                label: category.name,
-              })),
-            ]}
-            onChange={(cat) => setFilter((value) => ({ ...value, cat }))}
-          />
-          <CustomSelect
-            label="全部月份"
-            value={filter.month}
-            options={[
-              { value: "", label: "全部月份" },
-              ...months.map((month) => ({ value: month, label: month })),
-            ]}
-            onChange={(month) => setFilter((value) => ({ ...value, month }))}
-          />
+    <>
+      <GreetingStrip
+        date={now}
+        todayExpense={todayExpense}
+        weekNet={weekNet}
+        recordedToday={recordedToday}
+        note={trendNote}
+      />
+
+      <div className="v2-body">
+        {/* Receipt rail */}
+        <aside className="v2-receipt">
+          <div className="v2-receipt-perf top" />
+          <div className="v2-receipt-head">
+            <div className="mono v2-rec-no">N° {todayKey}</div>
+            <div className="v2-rec-title">月 度 凭 单</div>
+            <div className="mono v2-rec-sub">MONTHLY SUMMARY</div>
+          </div>
+          <div className="v2-receipt-rows">
+            <OpeningBalanceRow
+              value={openingBalance}
+              onChange={onOpeningBalance}
+            />
+            <div className="v2-rec-row income">
+              <span className="mono">+ 收入</span>
+              <span className="v2-rec-num mono">
+                {fmtMoney(monthData.income).slice(1)}
+              </span>
+            </div>
+            <div className="v2-rec-row expense">
+              <span className="mono">− 支出</span>
+              <span className="v2-rec-num mono">
+                {fmtMoney(monthData.expense).slice(1)}
+              </span>
+            </div>
+            <div className="v2-rec-rule" />
+            <div className="v2-rec-row total">
+              <span>结  余</span>
+              <span className="v2-rec-num mono">
+                {fmtMoney(monthBalance + openingBalance).slice(1)}
+              </span>
+            </div>
+          </div>
+          <div className="v2-receipt-stamp">
+            <div className="v2-stamp">
+              <div className="v2-stamp-inner">
+                <div>已</div>
+                <div>核</div>
+                <div>对</div>
+              </div>
+            </div>
+            <div className="v2-stamp-meta mono">
+              <div>{stampDate}</div>
+              <div>{stampTime}</div>
+              <div>WY-001</div>
+            </div>
+          </div>
+          <div className="v2-receipt-perf bottom" />
+        </aside>
+
+        {/* Main */}
+        <main className="v2-main">
+          {/* Hero stats */}
+          <section className="v2-stats">
+            <article className="v2-stat-card big">
+              <div className="v2-stat-label mono">本月结余 · NET BALANCE</div>
+              <div className="v2-stat-value">
+                <CountUp value={curNet} className="v2-bignum" />
+              </div>
+              <div className="v2-stat-trend">
+                {momPct === null ? (
+                  <span className="mono">无 上 月 数 据</span>
+                ) : (
+                  <>
+                    <span
+                      className={`v2-trend-pill ${momPct < 0 ? "down" : ""}`}
+                    >
+                      {momPct >= 0 ? "▲" : "▼"} {Math.abs(momPct).toFixed(1)}%
+                    </span>
+                    <span className="mono">较 上 月</span>
+                  </>
+                )}
+              </div>
+            </article>
+            <article className="v2-stat-card">
+              <div className="v2-stat-label mono">收入 · INCOME</div>
+              <CountUp value={stats.income} className="v2-midnum income-c" />
+              <div className="v2-stat-foot mono">
+                {records.filter((r) => getCat(r.catId).type === "income").length} 笔
+              </div>
+            </article>
+            <article className="v2-stat-card">
+              <div className="v2-stat-label mono">支出 · EXPENSE</div>
+              <CountUp value={stats.expense} className="v2-midnum expense-c" />
+              <div className="v2-stat-foot mono">
+                {records.filter((r) => getCat(r.catId).type === "expense").length} 笔
+              </div>
+            </article>
+          </section>
+
+          {/* Bars + donut */}
+          <section className="v2-charts">
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>收 支 走 势</h3>
+                  <div className="mono">
+                    {monthSeq[0]} ~ {monthSeq[monthSeq.length - 1]} · 6 MO
+                  </div>
+                </div>
+                <div className="v2-legend">
+                  <span>
+                    <span className="dot income" /> 收入
+                  </span>
+                  <span>
+                    <span className="dot expense" /> 支出
+                  </span>
+                </div>
+              </div>
+              <div className="v2-bar-chart">
+                {monthSeq.map((m) => {
+                  const v = stats.byMonth[m] ?? { income: 0, expense: 0 };
+                  return (
+                    <div key={m} className="v2-bar-group">
+                      <div className="v2-bars">
+                        <div
+                          className="v2-bar income"
+                          style={{
+                            height: `${(v.income / maxMonthVal) * 100}%`,
+                          }}
+                        >
+                          {v.income > 0 && (
+                            <span className="v2-bar-tip mono">
+                              {fmtCompact(v.income)}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className="v2-bar expense"
+                          style={{
+                            height: `${(v.expense / maxMonthVal) * 100}%`,
+                          }}
+                        >
+                          {v.expense > 0 && (
+                            <span className="v2-bar-tip mono">
+                              {fmtCompact(v.expense)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="v2-bar-label mono">{m.slice(5)}月</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>支 出 构 成</h3>
+                  <div className="mono">EXPENSE BREAKDOWN</div>
+                </div>
+              </div>
+              <div className="v2-donut-wrap">
+                <svg viewBox="0 0 120 120" className="v2-donut">
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="44"
+                    fill="none"
+                    stroke="#EFE4D2"
+                    strokeWidth="14"
+                  />
+                  {(() => {
+                    let off = 0;
+                    return expenseCats.map((c) => {
+                      const frac = c.amount / totalExp;
+                      const len = frac * 276.46;
+                      const arr = `${Math.max(0, len - 2)} ${276.46 - len + 2}`;
+                      const dashOff = -off;
+                      off += len;
+                      return (
+                        <circle
+                          key={c.id}
+                          cx="60"
+                          cy="60"
+                          r="44"
+                          fill="none"
+                          stroke={c.swatch}
+                          strokeWidth="14"
+                          strokeDasharray={arr}
+                          strokeDashoffset={dashOff}
+                          transform="rotate(-90 60 60)"
+                        />
+                      );
+                    });
+                  })()}
+                </svg>
+                <div className="v2-donut-center">
+                  <div className="mono v2-tag">TOTAL</div>
+                  <div
+                    className="v2-donut-num mono"
+                    data-len={fmtCompact(totalExp).length}
+                  >
+                    {fmtCompact(totalExp)}
+                  </div>
+                </div>
+              </div>
+              <div className="v2-donut-legend">
+                {expenseCats.slice(0, 5).map((c) => (
+                  <div key={c.id} className="v2-leg-row">
+                    <CatGlyph shape={c.shape} color={c.swatch} size={10} />
+                    <span className="v2-leg-name">{c.name}</span>
+                    <span className="v2-leg-pct">
+                      {((c.amount / totalExp) * 100).toFixed(0)}%
+                    </span>
+                    <span className="v2-leg-amt">
+                      {fmtMoney(c.amount, 0)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* Heatmap */}
+          <section className="v2-heat-card">
+            <div className="v2-card-head">
+              <div>
+                <h3>每 日 支 出 强 度</h3>
+                <div className="mono">42 DAYS · DEEPER = MORE SPENT</div>
+              </div>
+              <div className="v2-heat-scale mono">
+                少
+                <span
+                  className="v2-heat-cell"
+                  style={{ background: "#F5E6CC" }}
+                />
+                <span
+                  className="v2-heat-cell"
+                  style={{ background: "#E8B97A" }}
+                />
+                <span
+                  className="v2-heat-cell"
+                  style={{ background: "#C6701D" }}
+                />
+                <span
+                  className="v2-heat-cell"
+                  style={{ background: "#7C3A0E" }}
+                />
+                多
+              </div>
+            </div>
+            <div className="v2-heat-grid">
+              {heatDays.map((d) => {
+                const intensity = d.value / maxHeat;
+                let bg = "#F5E6CC";
+                if (intensity > 0.05) bg = "#E8B97A";
+                if (intensity > 0.25) bg = "#C6701D";
+                if (intensity > 0.5) bg = "#7C3A0E";
+                return (
+                  <div
+                    key={d.date}
+                    className="v2-heat-cell-big"
+                    style={{ background: bg } as CSSProperties}
+                    title={`${d.date} · ${fmtMoney(d.value, 0)}`}
+                  >
+                    <span className="mono">{d.date.slice(8)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* Entries */}
+          <section className="v2-entries">
+            <div className="v2-card-head">
+              <div>
+                <h3>近 期 账 目</h3>
+                <div className="mono">
+                  RECENT ENTRIES · {filtered.length}
+                </div>
+              </div>
+              <div className="v2-filters">
+                {(
+                  [
+                    ["all", "全部"],
+                    ["expense", "支出"],
+                    ["income", "收入"],
+                    ["month", "本月"],
+                  ] as const
+                ).map(([k, l]) => (
+                  <button
+                    key={k}
+                    className={entryFilter === k ? "active" : ""}
+                    onClick={() => setEntryFilter(k)}
+                    type="button"
+                  >
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="v2-entries-list">
+              {filtered.length === 0 && (
+                <div className="v2-empty">暂无记录</div>
+              )}
+              {filtered.slice(0, 12).map((r, i) => {
+                const cat = getCat(r.catId);
+                const isIn = cat.type === "income";
+                return (
+                  <div key={r.id} className="v2-entry">
+                    <div className="v2-entry-no mono">
+                      {String(i + 1).padStart(3, "0")}
+                    </div>
+                    <div className="v2-entry-date">
+                      <div className="d">{r.date.slice(8)}</div>
+                      <div className="m">{r.date.slice(5, 7)}月</div>
+                    </div>
+                    <div className="v2-entry-cat">
+                      <CatGlyph
+                        shape={cat.shape}
+                        color={cat.swatch}
+                        size={14}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div className="v2-entry-name">{cat.name}</div>
+                        <div className="v2-entry-note">{r.note || "—"}</div>
+                      </div>
+                    </div>
+                    <div className="v2-entry-tag">
+                      {isIn ? "INCOME" : "EXPENSE"}
+                    </div>
+                    <div
+                      className={`v2-entry-amt ${
+                        isIn ? "income-c" : "expense-c"
+                      }`}
+                    >
+                      {isIn ? "+" : "−"}
+                      {fmtMoney(r.amount).slice(1)}
+                    </div>
+                    <div className="v2-entry-actions">
+                      <button onClick={() => onEdit(r)} type="button">
+                        编辑
+                      </button>
+                      <button
+                        className="danger"
+                        onClick={() => onDelete(r)}
+                        type="button"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </main>
+      </div>
+    </>
+  );
+}
+
+/* =================================================================
+   Stats page
+================================================================= */
+function StatsPage({
+  records,
+  stats,
+  categories,
+}: {
+  records: RecordItem[];
+  stats: Stats;
+  categories: Category[];
+}) {
+  const expenseCats = categories
+    .filter((c) => c.type === "expense" && (stats.byCat[c.id] || 0) > 0)
+    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
+    .sort((a, b) => b.amount - a.amount);
+  const incomeCats = categories
+    .filter((c) => c.type === "income" && (stats.byCat[c.id] || 0) > 0)
+    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
+    .sort((a, b) => b.amount - a.amount);
+  const totalExp = expenseCats.reduce((s, c) => s + c.amount, 0) || 1;
+  const totalInc = incomeCats.reduce((s, c) => s + c.amount, 0) || 1;
+
+  // 6 month series — covers latest activity month even if it's future-dated
+  const now = new Date();
+  const monthSeq = buildMonthSeq(records, now);
+  const monthSeries = monthSeq.map((m) => ({
+    m,
+    income: stats.byMonth[m]?.income ?? 0,
+    expense: stats.byMonth[m]?.expense ?? 0,
+  }));
+  const maxM = Math.max(
+    ...monthSeries.flatMap((s) => [s.income, s.expense]),
+    1,
+  );
+  const nets = monthSeries.map((s) => s.income - s.expense);
+  const maxNet = Math.max(...nets.map(Math.abs), 1);
+
+  // day-of-week
+  const dow = [0, 0, 0, 0, 0, 0, 0];
+  records.forEach((r) => {
+    const c = categories.find((x) => x.id === r.catId);
+    if (c?.type === "expense") {
+      dow[new Date(r.date).getDay()] += r.amount;
+    }
+  });
+  const maxDow = Math.max(...dow, 1);
+  const dowLabel = ["日", "一", "二", "三", "四", "五", "六"];
+
+  const savingRate = stats.income > 0 ? (stats.balance / stats.income) * 100 : 0;
+  const ratio = stats.expense > 0 ? stats.income / stats.expense : 0;
+
+  return (
+    <>
+      <div className="v2-greet" style={{ paddingBottom: 20 }}>
+        <div className="v2-greet-l">
+          <div className="v2-greet-time mono">STATS · 统 计 报 告</div>
+          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
+            财 务 体 检 ·
+            <span className="v2-greet-name"> {monthSeq[5].slice(5)} 月</span>
+          </div>
+          <div className="v2-greet-sub">六个月趋势 · 分类构成 · 周内分布</div>
+        </div>
+        <div className="v2-greet-r">
+          <div className="v2-greet-stat">
+            <div className="mono">储蓄率</div>
+            <div className="v2-greet-num positive">
+              {Math.round(savingRate)}%
+            </div>
+          </div>
+          <div className="v2-greet-stat">
+            <div className="mono">收支比</div>
+            <div className="v2-greet-num">{ratio.toFixed(2)}</div>
+          </div>
         </div>
       </div>
 
-      <RecordTable records={records} getCat={getCat} onEdit={onEdit} onDelete={onDelete} />
-    </section>
+      <div className="v2-body single">
+        <main className="v2-main">
+          {/* Trend chart */}
+          <section className="v2-chart-card">
+            <div className="v2-card-head">
+              <div>
+                <h3>六 个 月 收 支 走 势</h3>
+                <div className="mono">
+                  {monthSeq[0]} → {monthSeq[5]} · MoM
+                </div>
+              </div>
+              <div className="v2-legend">
+                <span>
+                  <span className="dot income" /> 收入
+                </span>
+                <span>
+                  <span className="dot expense" /> 支出
+                </span>
+                <span style={{ marginLeft: 12, color: "var(--v2-terra-deep)" }}>
+                  ━ 净结余 · 上正下负
+                </span>
+              </div>
+            </div>
+            <div className="v2-stats-trend">
+              <svg
+                viewBox="0 0 800 290"
+                preserveAspectRatio="none"
+                style={{ width: "100%", height: 290 }}
+              >
+                {/* Above-baseline grid (bar area) */}
+                {[0, 0.25, 0.5, 0.75, 1].map((p, i) => (
+                  <line
+                    key={i}
+                    x1="40"
+                    x2="800"
+                    y1={20 + p * 180}
+                    y2={20 + p * 180}
+                    stroke="#C9B690"
+                    strokeDasharray="3 4"
+                    strokeWidth="0.5"
+                  />
+                ))}
+                {/* Zero baseline */}
+                <line
+                  x1="40"
+                  x2="800"
+                  y1="200"
+                  y2="200"
+                  stroke="#7C3A0E"
+                  strokeWidth="1"
+                  opacity="0.35"
+                />
+                {/* Below-baseline grid (negative net area) */}
+                <line
+                  x1="40"
+                  x2="800"
+                  y1="245"
+                  y2="245"
+                  stroke="#C9B690"
+                  strokeDasharray="3 4"
+                  strokeWidth="0.5"
+                />
+                {monthSeries.map((s, i) => {
+                  const x = 80 + i * 130;
+                  const incH = (s.income / maxM) * 180;
+                  const expH = (s.expense / maxM) * 180;
+                  const incRatio = s.income / maxM;
+                  const expRatio = s.expense / maxM;
+                  return (
+                    <g key={s.m}>
+                      <rect
+                        x={x - 22}
+                        y={200 - incH}
+                        width="20"
+                        height={incH}
+                        fill="#5C7C2C"
+                      />
+                      <rect
+                        x={x + 2}
+                        y={200 - expH}
+                        width="20"
+                        height={expH}
+                        fill="#B5532A"
+                      />
+                      {incRatio > 0.04 && (
+                        <text
+                          x={x - 12}
+                          y={200 - incH - 6}
+                          fontSize="10"
+                          fill="#5C7C2C"
+                          textAnchor="middle"
+                          fontFamily="JetBrains Mono"
+                        >
+                          {fmtCompact(s.income)}
+                        </text>
+                      )}
+                      {expRatio > 0.04 && (
+                        <text
+                          x={x + 12}
+                          y={200 - expH - 6}
+                          fontSize="10"
+                          fill="#B5532A"
+                          textAnchor="middle"
+                          fontFamily="JetBrains Mono"
+                        >
+                          {fmtCompact(s.expense)}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+                {/* Net line — signed: positive goes up, negative goes down */}
+                {(() => {
+                  const yNet = (net: number) => {
+                    if (net >= 0) return 200 - (net / maxNet) * 120;
+                    return 200 + (-net / maxNet) * 70;
+                  };
+                  return (
+                    <>
+                      <path
+                        d={monthSeries
+                          .map((s, i) => {
+                            const x = 80 + i * 130;
+                            const y = yNet(s.income - s.expense);
+                            return `${i === 0 ? "M" : "L"}${x},${y}`;
+                          })
+                          .join(" ")}
+                        fill="none"
+                        stroke="#7C3A0E"
+                        strokeWidth="2"
+                      />
+                      {monthSeries.map((s, i) => {
+                        const x = 80 + i * 130;
+                        const net = s.income - s.expense;
+                        const y = yNet(net);
+                        const fill =
+                          net > 0
+                            ? "#5C7C2C"
+                            : net < 0
+                              ? "#7C3A0E"
+                              : "#FAF3E2";
+                        return (
+                          <circle
+                            key={i}
+                            cx={x}
+                            cy={y}
+                            r="4"
+                            fill={fill}
+                            stroke="#7C3A0E"
+                            strokeWidth="2"
+                          >
+                            <title>
+                              {s.m} 净结余 {net >= 0 ? "+" : "−"}
+                              {fmtCompact(Math.abs(net))}
+                            </title>
+                          </circle>
+                        );
+                      })}
+                    </>
+                  );
+                })()}
+                {/* Month labels — at the bottom, below negative-net area */}
+                {monthSeries.map((s, i) => {
+                  const x = 80 + i * 130;
+                  return (
+                    <text
+                      key={s.m}
+                      x={x}
+                      y="282"
+                      fontSize="11"
+                      fill="#5C4A33"
+                      textAnchor="middle"
+                      fontFamily="JetBrains Mono"
+                    >
+                      {s.m.slice(5)}月
+                    </text>
+                  );
+                })}
+              </svg>
+            </div>
+          </section>
+
+          {/* Two columns */}
+          <section className="v2-charts even">
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>支 出 构 成</h3>
+                  <div className="mono">
+                    EXPENSE · {expenseCats.length} 类
+                  </div>
+                </div>
+              </div>
+              <div className="v2-stats-bars">
+                {expenseCats.map((c) => {
+                  const pct = (c.amount / totalExp) * 100;
+                  return (
+                    <div key={c.id} className="v2-stats-bar">
+                      <div className="v2-stats-bar-head">
+                        <span>
+                          <CatGlyph
+                            shape={c.shape}
+                            color={c.swatch}
+                            size={10}
+                          />
+                          {c.name}
+                        </span>
+                        <span className="mono">{fmtMoney(c.amount, 0)}</span>
+                      </div>
+                      <div className="v2-stats-bar-track">
+                        <div
+                          className="v2-stats-bar-fill"
+                          style={{ width: `${pct}%`, background: c.swatch }}
+                        />
+                        <span className="mono v2-stats-pct">
+                          {pct.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+                {expenseCats.length === 0 && (
+                  <div className="v2-empty">暂无支出数据</div>
+                )}
+              </div>
+            </div>
+
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>收 入 构 成</h3>
+                  <div className="mono">INCOME · {incomeCats.length} 类</div>
+                </div>
+              </div>
+              <div className="v2-stats-bars">
+                {incomeCats.map((c) => {
+                  const pct = (c.amount / totalInc) * 100;
+                  return (
+                    <div key={c.id} className="v2-stats-bar">
+                      <div className="v2-stats-bar-head">
+                        <span>
+                          <CatGlyph
+                            shape={c.shape}
+                            color={c.swatch}
+                            size={10}
+                          />
+                          {c.name}
+                        </span>
+                        <span className="mono">{fmtMoney(c.amount, 0)}</span>
+                      </div>
+                      <div className="v2-stats-bar-track">
+                        <div
+                          className="v2-stats-bar-fill"
+                          style={{ width: `${pct}%`, background: c.swatch }}
+                        />
+                        <span className="mono v2-stats-pct">
+                          {pct.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+                {incomeCats.length === 0 && (
+                  <div className="v2-empty">暂无收入数据</div>
+                )}
+              </div>
+              {incomeCats.length > 0 && (
+                <div className="v2-stats-side">
+                  <div className="v2-stats-side-row">
+                    <span className="mono">最大单笔收入</span>
+                    <span>
+                      {(() => {
+                        const incomeRecs = records.filter(
+                          (r) =>
+                            categories.find((c) => c.id === r.catId)?.type ===
+                            "income",
+                        );
+                        if (incomeRecs.length === 0) return "—";
+                        const max = incomeRecs.reduce((m, r) =>
+                          r.amount > m.amount ? r : m,
+                        );
+                        const c = categories.find((x) => x.id === max.catId);
+                        return `${c?.name ?? "未分类"} · ${fmtMoney(max.amount, 0)}`;
+                      })()}
+                    </span>
+                  </div>
+                  <div className="v2-stats-side-row">
+                    <span className="mono">平均单笔收入</span>
+                    <span>
+                      {fmtMoney(
+                        records
+                          .filter(
+                            (r) =>
+                              categories.find((c) => c.id === r.catId)?.type ===
+                              "income",
+                          )
+                          .reduce((s, r, _, a) => s + r.amount / a.length, 0),
+                        0,
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Day of week */}
+          <section className="v2-chart-card">
+            <div className="v2-card-head">
+              <div>
+                <h3>周 内 支 出 分 布</h3>
+                <div className="mono">BY DAY OF WEEK</div>
+              </div>
+              <div className="mono">
+                {(() => {
+                  const peak = dow.indexOf(Math.max(...dow));
+                  return `周${dowLabel[peak]} 支出最高`;
+                })()}
+              </div>
+            </div>
+            <div className="v2-dow">
+              {dow.map((v, i) => {
+                const h = (v / maxDow) * 140;
+                return (
+                  <div key={i} className="v2-dow-col">
+                    <div className="v2-dow-bar-wrap">
+                      <span className="mono v2-dow-amt">
+                        {fmtMoney(v, 0)}
+                      </span>
+                      <div className="v2-dow-bar" style={{ height: h }} />
+                    </div>
+                    <div className="v2-dow-label">周 {dowLabel[i]}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </main>
+      </div>
+    </>
   );
 }
 
-function StatsView({
-  categoryStats,
-  stats,
-}: {
-  categoryStats: { category: Category; amount: number }[];
-  stats: Stats;
-}) {
-  return (
-    <div className="stats-grid">
-      <section className="panel-block">
-        <PanelHeader title="分类占比" description="收入与支出的合计分布" />
-        <DonutChart items={categoryStats} />
-      </section>
-      <section className="panel-block">
-        <PanelHeader title="分类明细" description="每个分类的金额和占比" />
-        <CategoryBars items={categoryStats} income={stats.income} expense={stats.expense} />
-      </section>
-    </div>
-  );
-}
-
-function CategoriesView({
+/* =================================================================
+   Categories page
+================================================================= */
+function CategoriesPage({
   categories,
-  catForm,
-  setCatForm,
+  stats,
+  records,
   onAdd,
   onDelete,
 }: {
   categories: Category[];
-  catForm: CategoryForm;
-  setCatForm: React.Dispatch<React.SetStateAction<CategoryForm>>;
-  onAdd: () => void;
+  stats: Stats;
+  records: RecordItem[];
+  onAdd: (c: Omit<Category, "id">) => void;
   onDelete: (id: string) => void;
 }) {
+  const [form, setForm] = useState<CategoryForm>({
+    name: "",
+    type: "expense",
+    shape: "square",
+    swatch: PALETTE[0],
+  });
+
+  const exp = categories.filter((c) => c.type === "expense");
+  const inc = categories.filter((c) => c.type === "income");
+
+  function submit() {
+    if (!form.name.trim()) return;
+    onAdd({
+      name: form.name,
+      type: form.type,
+      shape: form.shape,
+      swatch: form.swatch,
+    });
+    setForm({
+      name: "",
+      type: form.type,
+      shape: "square",
+      swatch: PALETTE[0],
+    });
+  }
+
   return (
-    <div className="category-layout">
-      <section className="panel-block">
-        <PanelHeader title="新增分类" description="为收入或支出添加自定义分类" />
-        <div className="category-editor">
-          <CustomSelect
-            label="分类类型"
-            value={catForm.type}
-            options={[
-              { value: "expense", label: "支出" },
-              { value: "income", label: "收入" },
-            ]}
-            onChange={(type) => setCatForm((value) => ({ ...value, type }))}
-          />
-          <input
-            value={catForm.name}
-            placeholder="分类名称"
-            onChange={(event) => setCatForm((value) => ({ ...value, name: event.target.value }))}
-            onKeyDown={(event) => event.key === "Enter" && onAdd()}
-          />
-          <button onClick={onAdd} type="button">
-            添加
+    <>
+      <div className="v2-greet" style={{ paddingBottom: 20 }}>
+        <div className="v2-greet-l">
+          <div className="v2-greet-time mono">CATEGORIES · 分 类 管 理</div>
+          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
+            账 目 类 别 ·
+            <span className="v2-greet-name"> {categories.length} 类</span>
+          </div>
+          <div className="v2-greet-sub">用色块/形状区分类别 · 自定义无上限</div>
+        </div>
+        <div className="v2-greet-r">
+          <button className="v2-btn-primary" type="button" onClick={submit}>
+            + 新增分类
           </button>
         </div>
-      </section>
+      </div>
 
-      {(["expense", "income"] as const).map((type) => (
-        <section className="panel-block" key={type}>
-          <PanelHeader title={type === "expense" ? "支出分类" : "收入分类"} />
-          <div className="category-list">
-            {categories
-              .filter((category) => category.type === type)
-              .map((category) => {
-                const isDefault = DEFAULT_CATEGORIES.some((item) => item.id === category.id);
-                return (
-                  <div className="category-row" key={category.id}>
-                    <span>{category.name}</span>
-                    {isDefault ? (
-                      <small>默认</small>
-                    ) : (
-                      <button onClick={() => onDelete(category.id)} type="button">
-                        删除
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
+      <div className="v2-body single">
+        <main className="v2-main">
+          {/* Form */}
+          <section className="v2-chart-card">
+            <div className="v2-card-head">
+              <div>
+                <h3>新 增 分 类</h3>
+                <div className="mono">CREATE CATEGORY</div>
+              </div>
+            </div>
+            <div className="v2-cat-form">
+              <div className="v2-cat-form-field">
+                <label>类型</label>
+                <div className="v2-cat-type">
+                  <button
+                    type="button"
+                    className={
+                      form.type === "expense" ? "active expense" : ""
+                    }
+                    onClick={() =>
+                      setForm((f) => ({ ...f, type: "expense" }))
+                    }
+                  >
+                    支出
+                  </button>
+                  <button
+                    type="button"
+                    className={form.type === "income" ? "active income" : ""}
+                    onClick={() =>
+                      setForm((f) => ({ ...f, type: "income" }))
+                    }
+                  >
+                    收入
+                  </button>
+                </div>
+              </div>
+              <div className="v2-cat-form-field">
+                <label>名称</label>
+                <input
+                  className="v2-cat-input"
+                  placeholder="例如：办公用品"
+                  value={form.name}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, name: e.target.value }))
+                  }
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                />
+              </div>
+              <div className="v2-cat-form-field">
+                <label>形状</label>
+                <div className="v2-cat-shapes">
+                  {SHAPES.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={form.shape === s ? "active" : ""}
+                      onClick={() => setForm((f) => ({ ...f, shape: s }))}
+                    >
+                      <CatGlyph shape={s} color={form.swatch} size={14} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="v2-cat-form-field">
+                <label>颜色</label>
+                <div className="v2-cat-colors">
+                  {PALETTE.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`v2-color-sw ${
+                        form.swatch === c ? "active" : ""
+                      }`}
+                      style={{ background: c }}
+                      onClick={() => setForm((f) => ({ ...f, swatch: c }))}
+                      aria-label={c}
+                    />
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="v2-btn-primary v2-cat-submit"
+                onClick={submit}
+              >
+                保 存 分 类
+              </button>
+            </div>
+          </section>
+
+          {/* Lists */}
+          <section className="v2-charts even">
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>支 出 分 类</h3>
+                  <div className="mono">{exp.length} 类</div>
+                </div>
+              </div>
+              <CategoryList
+                cats={exp}
+                stats={stats}
+                records={records}
+                onDelete={onDelete}
+              />
+            </div>
+            <div className="v2-chart-card">
+              <div className="v2-card-head">
+                <div>
+                  <h3>收 入 分 类</h3>
+                  <div className="mono">{inc.length} 类</div>
+                </div>
+              </div>
+              <CategoryList
+                cats={inc}
+                stats={stats}
+                records={records}
+                onDelete={onDelete}
+              />
+            </div>
+          </section>
+        </main>
+      </div>
+    </>
+  );
+}
+
+function CategoryList({
+  cats,
+  stats,
+  records,
+  onDelete,
+}: {
+  cats: Category[];
+  stats: Stats;
+  records: RecordItem[];
+  onDelete: (id: string) => void;
+}) {
+  if (cats.length === 0)
+    return <div className="v2-empty">暂无分类</div>;
+  return (
+    <div className="v2-cat-list-2">
+      {cats.map((c) => {
+        const amount = stats.byCat[c.id] || 0;
+        const count = records.filter((r) => r.catId === c.id).length;
+        const isDefault = DEFAULT_CATEGORIES.some((d) => d.id === c.id);
+        return (
+          <div key={c.id} className="v2-cat-card">
+            <div className="v2-cat-card-l">
+              <CatGlyph shape={c.shape} color={c.swatch} size={20} />
+              <div>
+                <div className="v2-cat-card-name">
+                  {c.name}
+                  {isDefault && (
+                    <span className="v2-cat-card-meta-tag">默认</span>
+                  )}
+                </div>
+                <div className="v2-cat-card-meta">
+                  {count} 条记录 · {fmtMoney(amount, 0)}
+                </div>
+              </div>
+            </div>
+            <div className="v2-cat-card-r">
+              {!isDefault && (
+                <button
+                  className="v2-cat-action danger mono"
+                  type="button"
+                  onClick={() => onDelete(c.id)}
+                >
+                  删除
+                </button>
+              )}
+            </div>
           </div>
-        </section>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function QuickEntry({
+/* =================================================================
+   Backup page
+================================================================= */
+function BackupPage({
+  records,
   categories,
-  form,
-  setForm,
-  onSave,
-}: {
-  categories: Category[];
-  form: RecordForm;
-  setForm: React.Dispatch<React.SetStateAction<RecordForm>>;
-  onSave: () => void;
-}) {
-  return (
-    <section className="side-card quick-entry">
-      <div className="side-card-heading">
-        <h2>快速记一笔</h2>
-        <span>{form.type === "expense" ? "支出" : "收入"}</span>
-      </div>
-      <RecordFormFields categories={categories} form={form} setForm={setForm} compact />
-      <button className="submit-button" onClick={onSave} type="button">
-        保存记录
-      </button>
-    </section>
-  );
-}
-
-function BackupPanel({
   status,
   onExport,
   onImport,
-  importInputRef,
   onImportFile,
 }: {
+  records: RecordItem[];
+  categories: Category[];
   status: BackupStatus;
   onExport: () => void;
   onImport: () => void;
-  importInputRef: React.RefObject<HTMLInputElement | null>;
-  onImportFile: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onImportFile: (file: File) => void;
 }) {
+  const [dragging, setDragging] = useState(false);
+  const filename = `wangyuan-${today()}.xlsx`;
+  const sizeEstimate = Math.max(8, Math.round(records.length * 0.55 + 4));
+
+  function onDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) onImportFile(file);
+  }
+
   return (
-    <section className="side-card backup-card">
-      <div className="side-card-heading">
-        <h2>数据备份</h2>
-        <span>XLSX</span>
+    <>
+      <div className="v2-greet" style={{ paddingBottom: 20 }}>
+        <div className="v2-greet-l">
+          <div className="v2-greet-time mono">BACKUP · 数 据 备 份</div>
+          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
+            账 本 备 份 与
+            <span className="v2-greet-name"> 导 入 / 导 出</span>
+          </div>
+          <div className="v2-greet-sub">
+            数据保存于本机 · 支持 Excel xlsx 格式
+          </div>
+        </div>
+        <div className="v2-greet-r">
+          <div className="v2-greet-stat">
+            <div className="mono">本机总记录</div>
+            <div className="v2-greet-num">{records.length} 笔</div>
+          </div>
+        </div>
       </div>
-      <div className="backup-actions">
-        <button className="backup-primary" onClick={onExport} type="button">
-          导出 Excel
-        </button>
-        <button className="backup-secondary" onClick={onImport} type="button">
-          导入 Excel
-        </button>
+
+      <div className="v2-body two">
+        <section className="v2-backup-card export">
+          <div className="v2-backup-tag mono">EXPORT</div>
+          <h3 className="v2-backup-h">导 出 Excel</h3>
+          <p className="v2-backup-desc">
+            将所有账目记录、分类、汇总导出为 .xlsx 文件，三个工作表分别保存。可在 Numbers / Excel / WPS 中直接打开。
+          </p>
+          <div className="v2-backup-stat">
+            <div>
+              <div className="mono">将导出</div>
+              <div className="v2-backup-num">{records.length} 条记录</div>
+            </div>
+            <div>
+              <div className="mono">分类</div>
+              <div className="v2-backup-num">{categories.length} 类</div>
+            </div>
+            <div>
+              <div className="mono">文件大小估计</div>
+              <div className="v2-backup-num">~ {sizeEstimate} KB</div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="v2-btn-primary v2-backup-btn"
+            onClick={onExport}
+          >
+            ↓ 导出 {filename}
+          </button>
+          {status.message && status.type !== "idle" && (
+            <div className={`v2-backup-status ${status.type}`}>
+              {status.message}
+            </div>
+          )}
+        </section>
+
+        <section className="v2-backup-card import">
+          <div className="v2-backup-tag mono">IMPORT</div>
+          <h3 className="v2-backup-h">导 入 Excel</h3>
+          <p className="v2-backup-desc">
+            从 .xlsx 文件恢复账目。系统会校验日期、金额、分类等字段，并提示是否合并或覆盖现有数据。
+          </p>
+          <div
+            className={`v2-backup-drop ${dragging ? "dragging" : ""}`}
+            onClick={onImport}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="v2-drop-icon mono">+</div>
+            <div className="v2-drop-title">拖 拽 文 件 到 此</div>
+            <div className="mono v2-drop-sub">或 点 击 选 择 .xlsx</div>
+          </div>
+          <div className="v2-backup-warn">
+            <div className="v2-warn-stamp">!</div>
+            <div>
+              <div className="v2-warn-title">导入会覆盖当前数据</div>
+              <div className="mono v2-warn-sub">
+                建议先导出现有账本作为备份
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
-      <input
-        ref={importInputRef}
-        className="backup-file-input"
-        type="file"
-        accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-        onChange={onImportFile}
-      />
-      {status.message && (
-        <p className={`backup-status ${status.type}`}>{status.message}</p>
-      )}
-    </section>
+    </>
   );
 }
 
-function RecordFormFields({
-  categories,
+/* =================================================================
+   New record modal
+================================================================= */
+function NewRecordModal({
   form,
   setForm,
-  compact = false,
+  categories,
+  isEdit,
+  onClose,
+  onSave,
 }: {
-  categories: Category[];
   form: RecordForm;
   setForm: React.Dispatch<React.SetStateAction<RecordForm>>;
-  compact?: boolean;
+  categories: Category[];
+  isEdit: boolean;
+  onClose: () => void;
+  onSave: () => void;
 }) {
-  function setType(type: CategoryType) {
-    const firstCategory = categories.find((category) => category.type === type);
-    setForm((value) => ({
-      ...value,
-      type,
-      catId: firstCategory?.id ?? value.catId,
-    }));
+  const cats = categories.filter((c) => c.type === form.type);
+
+  function setType(t: CategoryType) {
+    const first = categories.find((c) => c.type === t);
+    setForm((f) => ({ ...f, type: t, catId: first?.id ?? f.catId }));
   }
 
-  return (
-    <div className={`record-form ${compact ? "compact" : ""}`}>
-      <div className="segmented">
-        <button
-          className={form.type === "expense" ? "active expense" : ""}
-          onClick={() => setType("expense")}
-          type="button"
-        >
-          支出
-        </button>
-        <button
-          className={form.type === "income" ? "active income" : ""}
-          onClick={() => setType("income")}
-          type="button"
-        >
-          收入
-        </button>
-      </div>
-
-      <label>
-        <span>分类</span>
-        <CustomSelect
-          label="分类"
-          value={form.catId}
-          options={categories
-            .filter((category) => category.type === form.type)
-            .map((category) => ({
-              value: category.id,
-              label: category.name,
-            }))}
-          onChange={(catId) => setForm((value) => ({ ...value, catId }))}
-        />
-      </label>
-
-      <label>
-        <span>金额</span>
-        <input
-          type="number"
-          inputMode="decimal"
-          min="0"
-          placeholder="0.00"
-          value={form.amount}
-          onChange={(event) => setForm((value) => ({ ...value, amount: event.target.value }))}
-        />
-      </label>
-
-      <label>
-        <span>日期</span>
-        <input
-          type="date"
-          value={form.date}
-          onChange={(event) => setForm((value) => ({ ...value, date: event.target.value }))}
-        />
-      </label>
-
-      <label>
-        <span>备注</span>
-        <input
-          placeholder="可选"
-          value={form.note}
-          onChange={(event) => setForm((value) => ({ ...value, note: event.target.value }))}
-        />
-      </label>
-    </div>
-  );
-}
-
-function CustomSelect<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: SelectOption<T>[];
-  onChange: (value: T) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const current = options.find((option) => option.value === value) ?? options[0];
-
-  function choose(nextValue: T) {
-    onChange(nextValue);
-    setOpen(false);
+  function pad(k: string) {
+    setForm((f) => {
+      let v = f.amount;
+      if (k === "⌫") {
+        v = v.slice(0, -1);
+      } else if (k === ".") {
+        if (!v.includes(".")) v = (v || "0") + ".";
+      } else {
+        v = (v + k).replace(/^0(\d)/, "$1");
+      }
+      return { ...f, amount: v };
+    });
   }
 
-  return (
-    <div className={`custom-select ${open ? "open" : ""}`} onBlur={() => setOpen(false)}>
-      <button
-        className="custom-select-trigger"
-        type="button"
-        aria-label={label}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((state) => !state)}
-      >
-        <span>{current?.label ?? label}</span>
-        <i aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="custom-select-menu" role="listbox" tabIndex={-1}>
-          {options.map((option) => (
-            <button
-              className={option.value === value ? "selected" : ""}
-              key={option.value}
-              role="option"
-              aria-selected={option.value === value}
-              type="button"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RecordTable({
-  records,
-  getCat,
-  onEdit,
-  onDelete,
-}: {
-  records: RecordItem[];
-  getCat: (id: string) => Category;
-  onEdit?: (record: RecordItem) => void;
-  onDelete?: (id: number) => void;
-}) {
-  if (records.length === 0) {
-    return <EmptyState text="暂无记录，新增一笔后会显示在这里。" />;
-  }
+  const recordNo = `${form.date.replace(/-/g, "-")}-${String(Math.floor(Math.random() * 900) + 100)}`;
 
   return (
-    <div className="record-table">
-      {records.map((record) => {
-        const category = getCat(record.catId);
-        const isIncome = category.type === "income";
-        return (
-          <div className="record-row" key={record.id}>
-            <div>
-              <strong>{category.name}</strong>
-              <span>
-                {record.date}
-                {record.note ? ` · ${record.note}` : ""}
-              </span>
+    <div className="v2-modal-stage" role="dialog" aria-modal="true">
+      <div className="v2-modal-bg" onClick={onClose} />
+      <div className="v2-modal-card">
+        <div className="v2-modal-perf top" />
+        <div className="v2-modal-head">
+          <div>
+            <div className="mono">
+              {isEdit ? "EDIT ENTRY" : "NEW ENTRY"} · No. {recordNo}
             </div>
-            <b className={isIncome ? "income-text" : "expense-text"}>
-              {isIncome ? "+" : "-"}
-              {formatMoney(record.amount)}
-            </b>
-            {(onEdit || onDelete) && (
-              <div className="row-actions">
-                {onEdit && (
-                  <button onClick={() => onEdit(record)} type="button">
-                    编辑
-                  </button>
-                )}
-                {onDelete && (
-                  <button className="danger" onClick={() => onDelete(record.id)} type="button">
-                    删除
-                  </button>
-                )}
-              </div>
+            <h2 className="v2-modal-h">{isEdit ? "编 辑 记 录" : "新 增 记 录"}</h2>
+          </div>
+          <button
+            type="button"
+            className="v2-modal-x"
+            onClick={onClose}
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="v2-modal-tabs">
+          <button
+            type="button"
+            className={form.type === "expense" ? "active expense" : ""}
+            onClick={() => setType("expense")}
+          >
+            支 出
+          </button>
+          <button
+            type="button"
+            className={form.type === "income" ? "active income" : ""}
+            onClick={() => setType("income")}
+          >
+            收 入
+          </button>
+        </div>
+
+        <div className="v2-modal-amount">
+          <span className="v2-modal-cur">¥</span>
+          <input
+            className="v2-modal-input"
+            value={form.amount}
+            placeholder="0.00"
+            onChange={(e) =>
+              setForm((f) => ({ ...f, amount: e.target.value.replace(/[^\d.]/g, "") }))
+            }
+            inputMode="decimal"
+          />
+          <div className="v2-modal-pad">
+            {["7", "8", "9", "4", "5", "6", "1", "2", "3", ".", "0", "⌫"].map(
+              (k) => (
+                <button
+                  key={k}
+                  type="button"
+                  className="v2-pad-key"
+                  onClick={() => pad(k)}
+                >
+                  {k}
+                </button>
+              ),
             )}
           </div>
-        );
-      })}
-    </div>
-  );
-}
+        </div>
 
-function MiniRecord({ record, category }: { record: RecordItem; category: Category }) {
-  const isIncome = category.type === "income";
-  return (
-    <div className="mini-record">
-      <div>
-        <strong>{category.name}</strong>
-        <span>{record.date}</span>
-      </div>
-      <b className={isIncome ? "income-text" : "expense-text"}>
-        {isIncome ? "+" : "-"}
-        {formatMoney(record.amount)}
-      </b>
-    </div>
-  );
-}
+        <div className="v2-modal-section">
+          <div className="v2-modal-label">分 类</div>
+          <div className="v2-modal-cats">
+            {cats.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`v2-modal-cat ${form.catId === c.id ? "active" : ""}`}
+                onClick={() => setForm((f) => ({ ...f, catId: c.id }))}
+              >
+                <CatGlyph shape={c.shape} color={c.swatch} size={14} />
+                <span>{c.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
 
-function CategoryBars({
-  items,
-  income,
-  expense,
-}: {
-  items: { category: Category; amount: number }[];
-  income: number;
-  expense: number;
-}) {
-  if (items.length === 0) {
-    return <EmptyState text="暂无统计数据。" compact />;
-  }
-
-  return (
-    <div className="category-bars">
-      {items.map(({ category, amount }, index) => {
-        const base = category.type === "income" ? income : expense;
-        const percent = base > 0 ? Math.round((amount / base) * 100) : 0;
-        return (
-          <div className="bar-item" key={category.id}>
-            <div>
-              <span>{category.name}</span>
-              <strong>{formatMoney(amount)}</strong>
-            </div>
-            <div className="bar-track">
-              <div
-                className="bar-fill"
-                style={{
-                  width: `${Math.max(percent, 4)}%`,
-                  background: COLORS[index % COLORS.length],
-                }}
+        <div className="v2-modal-row">
+          <div className="v2-modal-section">
+            <div className="v2-modal-label">日 期</div>
+            <div className="v2-modal-date">
+              <input
+                type="date"
+                value={form.date}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, date: e.target.value }))
+                }
               />
+              <span className="mono">周{weekdayCN(form.date)}</span>
             </div>
-            <small>{percent}%</small>
           </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function DonutChart({ items }: { items: { category: Category; amount: number }[] }) {
-  const total = items.reduce((sum, item) => sum + item.amount, 0);
-  let offset = 0;
-
-  if (items.length === 0 || total === 0) {
-    return <EmptyState text="暂无统计数据。" compact />;
-  }
-
-  return (
-    <div className="donut-layout">
-      <svg viewBox="0 0 120 120" className="donut-chart" role="img" aria-label="分类占比图">
-        <circle cx="60" cy="60" r="44" className="donut-base" />
-        {items.map((item, index) => {
-          const fraction = item.amount / total;
-          const length = fraction * 276.46;
-          const strokeDasharray = `${length} ${276.46 - length}`;
-          const strokeDashoffset = -offset;
-          offset += length;
-          return (
-            <circle
-              key={item.category.id}
-              cx="60"
-              cy="60"
-              r="44"
-              className="donut-slice"
-              stroke={COLORS[index % COLORS.length]}
-              strokeDasharray={strokeDasharray}
-              strokeDashoffset={strokeDashoffset}
+          <div className="v2-modal-section">
+            <div className="v2-modal-label">备 注</div>
+            <input
+              className="v2-modal-note"
+              placeholder="可选 — 例如：嘉实多 95#"
+              value={form.note}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, note: e.target.value }))
+              }
             />
-          );
-        })}
-      </svg>
-      <div className="donut-legend">
-        {items.map((item, index) => (
-          <div key={item.category.id}>
-            <span style={{ background: COLORS[index % COLORS.length] }} />
-            <strong>{item.category.name}</strong>
-            <em>{Math.round((item.amount / total) * 100)}%</em>
           </div>
-        ))}
+        </div>
+
+        <div className="v2-modal-rule" />
+
+        <div className="v2-modal-footer">
+          <button type="button" className="v2-btn-ghost mono" onClick={onClose}>
+            取消
+          </button>
+          <button
+            type="button"
+            className="v2-btn-primary"
+            onClick={onSave}
+            disabled={!form.amount || Number(form.amount) <= 0 || !form.catId}
+          >
+            {isEdit ? "保 存 修 改" : "保 存 记 录 · ⏎"}
+          </button>
+        </div>
+        <div className="v2-modal-perf bottom" />
       </div>
     </div>
   );
 }
 
-function PanelHeader({ title, description }: { title: string; description?: string }) {
+/* =================================================================
+   Delete confirm modal
+================================================================= */
+function DeleteConfirmModal({
+  record,
+  category,
+  onCancel,
+  onConfirm,
+}: {
+  record: RecordItem;
+  category: Category;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   return (
-    <div className="panel-header">
-      <h2>{title}</h2>
-      {description && <p>{description}</p>}
+    <div className="v2-modal-stage" role="dialog" aria-modal="true">
+      <div className="v2-modal-bg" onClick={onCancel} />
+      <div className="v2-modal-card v2-confirm-card">
+        <div className="v2-modal-perf top" />
+        <div className="v2-modal-head">
+          <div>
+            <div className="mono">CONFIRM DELETE · No. {record.id}</div>
+            <h2 className="v2-modal-h">确 认 删 除</h2>
+          </div>
+          <button
+            type="button"
+            className="v2-modal-x"
+            onClick={onCancel}
+            aria-label="取消"
+          >
+            ×
+          </button>
+        </div>
+
+        <p
+          style={{
+            margin: "16px 0 0",
+            fontSize: 13,
+            color: "var(--v2-ink-soft)",
+            lineHeight: 1.7,
+          }}
+        >
+          删除后会立即从本地数据中移除，无法在应用内撤回。
+        </p>
+
+        <dl className="v2-confirm-list">
+          <dt>分 类</dt>
+          <dd>
+            <CatGlyph
+              shape={category.shape}
+              color={category.swatch}
+              size={10}
+            />{" "}
+            {category.name}
+          </dd>
+          <dt>金 额</dt>
+          <dd className="mono">{fmtMoney(record.amount)}</dd>
+          <dt>日 期</dt>
+          <dd className="mono">
+            {record.date} 周{weekdayCN(record.date)}
+          </dd>
+          {record.note && (
+            <>
+              <dt>备 注</dt>
+              <dd>{record.note}</dd>
+            </>
+          )}
+        </dl>
+
+        <div className="v2-modal-footer">
+          <button type="button" className="v2-btn-ghost mono" onClick={onCancel}>
+            取消
+          </button>
+          <button type="button" className="v2-btn-primary" onClick={onConfirm}>
+            确 认 删 除
+          </button>
+        </div>
+        <div className="v2-modal-perf bottom" />
+      </div>
     </div>
   );
-}
-
-function EmptyState({ text, compact = false }: { text: string; compact?: boolean }) {
-  return <div className={`empty-state ${compact ? "compact" : ""}`}>{text}</div>;
 }
 
 export default App;
