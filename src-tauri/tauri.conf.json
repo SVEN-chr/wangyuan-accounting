@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "王源专属记账工作台",
   "version": "0.1.0",
-  "identifier": "com.administrator.tauri-app",
+  "identifier": "com.administrator.wangyuan-accounting",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-app",
+        "title": "王源专属记账工作台",
         "width": 800,
         "height": 600,
         "maximized": true
