@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Generated outputs
+coverage/
+
+# Claude Code
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
