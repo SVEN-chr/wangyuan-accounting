@@ -55,9 +55,13 @@ Almost the entire app lives in `src/App.tsx` — top-level `App` component plus 
 
 `loadAccountingData` / `saveAccountingData` try Tauri commands first; on failure (e.g. running in plain browser via `pnpm dev`) they fall back to `localStorage`. This lets you iterate UI in a browser without launching the desktop shell.
 
+- **Save is debounced** (300 ms) in the App's persist `useEffect`. Bursts of edits coalesce into one write — preserve this when refactoring the persist effect; don't move the work inline.
+- **Save is atomic on the Rust side**: `save_accounting_store` writes to `accounting-data.json.tmp` then `fs::rename`s over the target. The user's ledger is irreplaceable, so don't replace this with a plain `fs::write`.
+- **Save only writes the consolidated localStorage key** (`accounting.file-store-fallback`). The three legacy split keys (`accounting.records` etc.) are still *read* by `loadFallback` for one-shot migration of old browser data, but never written.
+
 The Rust side (`src-tauri/src/lib.rs`) exposes three commands:
 - `load_accounting_store` — reads `~/Desktop/王源专属记账工作台的文件夹/accounting-data.json`. Auto-migrates from legacy `app_data_dir` location on first read.
-- `save_accounting_store` — writes the same file.
+- `save_accounting_store` — atomic write via tmp + rename.
 - `save_excel_backup` — drops a sanitized `.xlsx` into the same workspace folder.
 
 When you change `PersistedAccountingData` shape, update both the TS type AND the load/save migration logic — the file may contain older shapes from prior versions. The `migrateCategory` helper handles category-shape evolution.
@@ -71,7 +75,13 @@ If storage is empty AND `accounting.first-run-seeded` localStorage flag is unset
 - `Category`: `{ id, name, type: "expense"|"income", shape: square|circle|diamond|triangle|halfcircle, swatch: hex }`. `CatGlyph` renders the shape from these fields — categories are deliberately icon-less, distinguished by shape+color.
 - `RecordItem`: `{ id, catId, amount, date: "YYYY-MM-DD", note? }`. Amounts always positive; sign comes from the category's type.
 - `openingBalance`: editable via the receipt rail's 期初 row in the Ledger page; persisted alongside records/categories.
-- `DEFAULT_CATEGORIES` are protected: `deleteCategory` refuses to remove them. Custom categories use `custom-${Date.now()}` ids; Excel-imported ones use `excel-${type}-${slug}` to avoid collisions.
+- `DEFAULT_CATEGORIES` are protected: `deleteCategory` refuses to remove them via the `DEFAULT_CATEGORY_IDS` Set. Custom categories use `custom-${Date.now()}` ids; Excel-imported ones use `excel-${type}-${slug}` to avoid collisions.
+
+### Category lookups go through `getCat` / `catsById`
+
+The App-level `useMemo` builds `catsById: Map<string, Category>` once and exposes a stable `getCat(id)` that closes over it (with a synthetic `"unknown"`/`"未分类"` fallback for stranded record ids). Pass `getCat` down — **don't write `categories.find(c => c.id === r.catId)` inline.** That pattern was an O(records × categories) hot-path bug across `LedgerPage` / `StatsPage` and was deliberately removed; reintroducing it regresses every page render.
+
+`StatsPage` rebuilds its own `catsById` locally because it doesn't receive `getCat` as a prop — same Map, same idiom.
 
 ### Excel import/export
 
@@ -79,11 +89,20 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 
 ### Charts and number formatting
 
-- `fmtMoney(n, decimals=2)` — full `¥12,345.67` form.
+- `fmtAmount(n, decimals=2)` — bare number `12,345.67`, no currency prefix. Use inside receipt rows / entry rows where the `¥` is rendered separately or the column is implicitly a money column.
+- `fmtMoney(n, decimals=2)` — `"¥" + fmtAmount(...)`, full `¥12,345.67` form. (Don't write `fmtMoney(x).slice(1)` to strip the prefix — call `fmtAmount` directly.)
 - `fmtCompact(n)` — abbreviated `1.2M` / `45.6K` / `89` for chart labels and the donut center. Use this anywhere a number could grow large (≥1M) and squeeze its container.
 - `splitMoney(n)` — for big-typography splits like `¥48,290`+`.00`, used by `CountUp`.
+- `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. Use these instead of inlining `toISOString().slice(0,10)` or `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`.
 - `buildMonthSeq(records, now)` — produces 6 month-keys ending at `max(currentMonth, latestRecordMonth)`, so charts include future-dated entries the user has manually entered. Both `LedgerPage` and `StatsPage` go through this.
-- The stats trend chart uses an asymmetric Y mapping: positive net goes up 120 logical units (into the bar area); negative net goes down 70 units (below the y=200 baseline). Don't accidentally clip negative values off the SVG when changing the chart.
+- `categoryBreakdown(cats, byCat, type)` — returns `{ items, total }` filtered to the given type, sorted by amount desc, with `total` clamped to `1` to keep `amount/total` divisions safe. Used by both pages' donut and bar charts.
+- `BreakdownBars` component — renders the stats-bar list. Both expense and income breakdowns share it; don't reinline.
+- `heatColor(intensity)` / `netColor(net)` — color-threshold lookups for the heatmap and the net-line chart dots. Don't re-implement the cascading `if`-chain inline.
+- The stats trend chart uses an asymmetric Y mapping: positive net goes up 120 logical units (into the bar area); negative net goes down 70 units (below the y=200 baseline). Don't accidentally clip negative values off the SVG when changing the chart. The `yNet(net)` helper is hoisted in `StatsPage` — keep it that way (it was previously an IIFE and got nested 3 deep).
+
+### Memo discipline
+
+`LedgerPage` and `StatsPage` cache derived data with `useMemo` keyed on **string keys** (`todayKey`, `currentMonthKey`) rather than the `now: Date` object. `now = new Date()` runs fresh per render, but the heavy memos only invalidate when the date string actually changes — so re-renders from filter clicks or modal toggles don't recompute monthSeq/heatDays/dailyAggregates. If you add a memo that depends on "today", depend on `todayKey`, never on `now`.
 
 ### Greeting / trend copy is data-driven
 
@@ -94,4 +113,4 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 - Chinese UI text, with letter-spacing applied per-character via spaces (e.g. `书 业 账 房`, `保 存 记 录`). Match this when adding new copy.
 - Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`.
 - Receipt cards (`.v2-receipt`, `.v2-modal-card`) use perforated edges via `radial-gradient` masks (`.v2-receipt-perf` / `.v2-modal-perf`). Keep the perf elements when adding new ledger surfaces.
-- Default categories must not be deletable — the UI hides the delete button for them (`DEFAULT_CATEGORIES.some(...)` check).
+- Default categories must not be deletable — the UI hides the delete button via the `DEFAULT_CATEGORY_IDS` Set lookup (don't revert to `DEFAULT_CATEGORIES.some(...)` in render code).

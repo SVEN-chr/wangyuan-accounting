@@ -145,21 +145,26 @@ const SAMPLE_RECORDS: RecordItem[] = [
   { id: 130, catId: "rent", amount: 6800, date: "2026-04-01", note: "工作室三月" },
 ];
 
+const DEFAULT_CATEGORY_IDS = new Set(DEFAULT_CATEGORIES.map((c) => c.id));
+const EXCEL_DATE_SEPARATOR_RE = /[./]/g;
+const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
+
 /* =================================================================
    Helpers
 ================================================================= */
 
-const today = () => new Date().toISOString().slice(0, 10);
+const dateKey = (d: Date) => d.toISOString().slice(0, 10);
+const today = () => dateKey(new Date());
+const monthKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 
-const fmtMoney = (n: number, decimals = 2) => {
-  return (
-    "¥" +
-    Number(n).toLocaleString("zh-CN", {
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
-    })
-  );
-};
+const fmtAmount = (n: number, decimals = 2) =>
+  Number(n).toLocaleString("zh-CN", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+
+const fmtMoney = (n: number, decimals = 2) => "¥" + fmtAmount(n, decimals);
 
 const splitMoney = (n: number): [string, string] => {
   const parts = Number(n).toFixed(2).split(".");
@@ -175,19 +180,34 @@ const fmtCompact = (n: number): string => {
   return `${sign}${abs.toFixed(0)}`;
 };
 
+const HEAT_COLORS: Array<[number, string]> = [
+  [0.5, "#7C3A0E"],
+  [0.25, "#C6701D"],
+  [0.05, "#E8B97A"],
+];
+const HEAT_BASE = "#F5E6CC";
+const heatColor = (intensity: number): string => {
+  for (const [threshold, color] of HEAT_COLORS) {
+    if (intensity > threshold) return color;
+  }
+  return HEAT_BASE;
+};
+
+const netColor = (net: number): string =>
+  net > 0 ? "#5C7C2C" : net < 0 ? "#7C3A0E" : "#FAF3E2";
+
+const DOW_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
+
 function buildMonthSeq(records: RecordItem[], now: Date): string[] {
-  const curStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const candidates = records.map((r) => r.date.slice(0, 7)).filter(Boolean);
-  candidates.push(curStr);
-  candidates.sort();
-  const endMonth = candidates[candidates.length - 1];
+  let endMonth = monthKey(now);
+  for (const r of records) {
+    const m = r.date.slice(0, 7);
+    if (m && m > endMonth) endMonth = m;
+  }
   const [y, m] = endMonth.split("-").map(Number);
   const seq: string[] = [];
   for (let i = 5; i >= 0; i--) {
-    const d = new Date(y, m - 1 - i, 1);
-    seq.push(
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-    );
+    seq.push(monthKey(new Date(y, m - 1 - i, 1)));
   }
   return seq;
 }
@@ -205,7 +225,7 @@ function timeGreeting(d: Date) {
 
 function weekdayCN(d: Date | string) {
   const date = typeof d === "string" ? new Date(d) : d;
-  return ["日", "一", "二", "三", "四", "五", "六"][date.getDay()];
+  return DOW_LABEL[date.getDay()];
 }
 
 function loadFallbackJson<T>(key: string, fallback: T): T {
@@ -236,8 +256,8 @@ function migrateCategory(c: Partial<Category>, fallback?: Category): Category {
   };
 }
 
-async function loadAccountingData(): Promise<PersistedAccountingData> {
-  const fb = loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
+function loadFallback(): PersistedAccountingData {
+  return loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
     records: loadFallbackJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
     categories: loadFallbackJson<Category[]>(
       CATEGORIES_STORAGE_KEY,
@@ -248,11 +268,14 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
       DEFAULT_OPENING_BALANCE,
     ),
   });
+}
 
+async function loadAccountingData(): Promise<PersistedAccountingData> {
   try {
     const raw = await invoke<string>("load_accounting_store");
-    if (!raw) return fb;
+    if (!raw) return loadFallback();
     const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
+    const fb = loadFallback();
     return {
       records: Array.isArray(parsed.records) ? parsed.records : fb.records,
       categories: Array.isArray(parsed.categories)
@@ -265,7 +288,7 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
           : fb.openingBalance,
     };
   } catch {
-    return fb;
+    return loadFallback();
   }
 }
 
@@ -274,9 +297,6 @@ async function saveAccountingData(data: PersistedAccountingData) {
     await invoke("save_accounting_store", { payload: JSON.stringify(data) });
   } catch {
     saveFallbackJson(FALLBACK_STORAGE_KEY, data);
-    saveFallbackJson(RECORDS_STORAGE_KEY, data.records);
-    saveFallbackJson(CATEGORIES_STORAGE_KEY, data.categories);
-    saveFallbackJson(OPENING_BALANCE_STORAGE_KEY, data.openingBalance);
   }
 }
 
@@ -292,8 +312,8 @@ function parseCategoryType(value: unknown): CategoryType | null {
 }
 
 function parseShape(value: unknown): CatShape | null {
-  const t = String(value ?? "").trim().toLowerCase();
-  return (SHAPES as string[]).includes(t) ? (t as CatShape) : null;
+  const t = String(value ?? "").trim().toLowerCase() as CatShape;
+  return SHAPES.includes(t) ? t : null;
 }
 
 function readExcelCell(row: ExcelRow, keys: string[]): unknown {
@@ -334,8 +354,8 @@ function parseExcelDate(value: unknown) {
   }
   const text = String(value ?? "").trim();
   if (!text) return "";
-  const normalized = text.replace(/[./]/g, "-");
-  const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const normalized = text.replace(EXCEL_DATE_SEPARATOR_RE, "-");
+  const match = normalized.match(EXCEL_DATE_MATCH_RE);
   if (!match) return "";
   return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
 }
@@ -384,12 +404,32 @@ function createInitialForm(
 ): RecordForm {
   const cat = cats.find((c) => c.type === type) ?? cats[0];
   return {
-    type: cat?.type ?? type,
-    catId: cat?.id ?? DEFAULT_CATEGORIES[0].id,
+    type: cat.type,
+    catId: cat.id,
     amount: "",
     date: today(),
     note: "",
   };
+}
+
+type BreakdownItem = Category & { amount: number };
+
+function categoryBreakdown(
+  cats: Category[],
+  byCat: Record<string, number>,
+  type: CategoryType,
+): { items: BreakdownItem[]; total: number } {
+  const items: BreakdownItem[] = [];
+  let total = 0;
+  for (const c of cats) {
+    if (c.type !== type) continue;
+    const amount = byCat[c.id] || 0;
+    if (amount <= 0) continue;
+    items.push({ ...c, amount });
+    total += amount;
+  }
+  items.sort((a, b) => b.amount - a.amount);
+  return { items, total: total || 1 };
 }
 
 /* =================================================================
@@ -584,21 +624,30 @@ function App() {
     };
   }, []);
 
-  /* ---- persist ---- */
+  /* ---- persist (debounced — bursts of edits coalesce) ---- */
   useEffect(() => {
     if (!storageLoaded) return;
-    void saveAccountingData({ records, categories, openingBalance });
+    const handle = window.setTimeout(() => {
+      void saveAccountingData({ records, categories, openingBalance });
+    }, 300);
+    return () => window.clearTimeout(handle);
   }, [records, categories, openingBalance, storageLoaded]);
 
   /* ---- derived ---- */
-  const getCat = (id: string): Category =>
-    categories.find((c) => c.id === id) ?? {
+  const catsById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories],
+  );
+  const getCat = useMemo(() => {
+    const fallback: Category = {
       id: "unknown",
       name: "未分类",
       type: "expense",
       shape: "square",
       swatch: "#999",
     };
+    return (id: string): Category => catsById.get(id) ?? fallback;
+  }, [catsById]);
 
   const sortedRecords = useMemo(
     () =>
@@ -617,18 +666,15 @@ function App() {
   );
 
   const filteredEntries = useMemo(() => {
-    const now = new Date();
-    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    return sortedRecords.filter((r) => {
-      const c = getCat(r.catId);
-      if (entryFilter === "all") return true;
-      if (entryFilter === "expense") return c.type === "expense";
-      if (entryFilter === "income") return c.type === "income";
-      if (entryFilter === "month") return r.date.startsWith(month);
-      return true;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortedRecords, entryFilter, categories]);
+    const month = monthKey(new Date());
+    const predicates: Record<EntryFilter, (r: RecordItem) => boolean> = {
+      all: () => true,
+      expense: (r) => getCat(r.catId).type === "expense",
+      income: (r) => getCat(r.catId).type === "income",
+      month: (r) => r.date.startsWith(month),
+    };
+    return sortedRecords.filter(predicates[entryFilter]);
+  }, [sortedRecords, entryFilter, getCat]);
 
   /* ---- actions ---- */
   function openAddModal(type: CategoryType = "expense") {
@@ -705,7 +751,7 @@ function App() {
   }
 
   function deleteCategory(id: string) {
-    if (DEFAULT_CATEGORIES.some((c) => c.id === id)) return;
+    if (DEFAULT_CATEGORY_IDS.has(id)) return;
     setCategories((items) => items.filter((c) => c.id !== id));
     setRecords((items) => items.filter((r) => r.catId !== id));
   }
@@ -1139,7 +1185,7 @@ function GreetingStrip({
           <div className="mono">本周净流入</div>
           <div className={`v2-greet-num ${weekNet >= 0 ? "positive" : ""}`}>
             {weekNet >= 0 ? "+" : "−"}
-            {fmtMoney(Math.abs(weekNet), 0).replace("¥", "¥")}
+            {fmtMoney(Math.abs(weekNet), 0)}
           </div>
         </div>
       </div>
@@ -1200,7 +1246,7 @@ function OpeningBalanceRow({
       title="点击编辑期初余额"
     >
       <span className="mono">期 初</span>
-      <span className="v2-rec-num mono">{fmtMoney(value).slice(1)}</span>
+      <span className="v2-rec-num mono">{fmtAmount(value)}</span>
     </div>
   );
 }
@@ -1234,54 +1280,72 @@ function LedgerPage({
   onOpeningBalance: (n: number) => void;
 }) {
   const now = new Date();
-  const todayKey = now.toISOString().slice(0, 10);
-  const todayExpense = records
-    .filter((r) => r.date === todayKey && getCat(r.catId).type === "expense")
-    .reduce((s, r) => s + r.amount, 0);
+  const todayKey = dateKey(now);
+  const currentMonthKey = monthKey(now);
 
-  // last 7 days net
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - 6);
-  const weekRecords = records.filter((r) => new Date(r.date) >= weekStart);
-  const weekNet = weekRecords.reduce((s, r) => {
-    const c = getCat(r.catId);
-    return c.type === "income" ? s + r.amount : s - r.amount;
-  }, 0);
-  const recordedToday = records.filter((r) => r.date === todayKey).length;
+  const dailyAggregates = useMemo(() => {
+    const reference = new Date(todayKey);
+    reference.setDate(reference.getDate() - 6);
+    const weekStartKey = dateKey(reference);
+    let todayExpense = 0;
+    let weekNet = 0;
+    let recordedToday = 0;
+    let incomeCount = 0;
+    let expenseCount = 0;
+    for (const r of records) {
+      const c = getCat(r.catId);
+      if (c.type === "income") incomeCount += 1;
+      else expenseCount += 1;
+      if (r.date === todayKey) {
+        recordedToday += 1;
+        if (c.type === "expense") todayExpense += r.amount;
+      }
+      if (r.date >= weekStartKey) {
+        weekNet += c.type === "income" ? r.amount : -r.amount;
+      }
+    }
+    return { todayExpense, weekNet, recordedToday, incomeCount, expenseCount };
+  }, [records, getCat, todayKey]);
 
   // 6-month series — covers up to latest activity month (handles future-dated records)
-  const monthSeq = buildMonthSeq(records, now);
-  const allMonthVals = monthSeq.flatMap((m) => {
-    const v = stats.byMonth[m] ?? { income: 0, expense: 0 };
-    return [v.income, v.expense];
-  });
-  const maxMonthVal = Math.max(...allMonthVals, 1);
+  const monthSeq = useMemo(
+    () => buildMonthSeq(records, new Date(currentMonthKey + "-01")),
+    [records, currentMonthKey],
+  );
 
-  // MoM change — compare the last two months in the sequence
-  const curKey = monthSeq[5];
-  const prevKey = monthSeq[4];
-  const cur = stats.byMonth[curKey] ?? { income: 0, expense: 0 };
-  const prev = stats.byMonth[prevKey] ?? { income: 0, expense: 0 };
-  const curNet = cur.income - cur.expense;
-  const prevNet = prev.income - prev.expense;
-  const hasPrev = prev.income > 0 || prev.expense > 0;
-  const momPct =
-    hasPrev && prevNet !== 0
-      ? ((curNet - prevNet) / Math.abs(prevNet)) * 100
-      : null;
+  const { maxMonthVal, curNet, momPct } = useMemo(() => {
+    let maxVal = 1;
+    for (const m of monthSeq) {
+      const v = stats.byMonth[m];
+      if (!v) continue;
+      if (v.income > maxVal) maxVal = v.income;
+      if (v.expense > maxVal) maxVal = v.expense;
+    }
+    const cur = stats.byMonth[monthSeq[5]] ?? { income: 0, expense: 0 };
+    const prev = stats.byMonth[monthSeq[4]] ?? { income: 0, expense: 0 };
+    const curN = cur.income - cur.expense;
+    const prevN = prev.income - prev.expense;
+    const hasPrev = prev.income > 0 || prev.expense > 0;
+    return {
+      maxMonthVal: maxVal,
+      curNet: curN,
+      momPct:
+        hasPrev && prevN !== 0
+          ? ((curN - prevN) / Math.abs(prevN)) * 100
+          : null,
+    };
+  }, [stats.byMonth, monthSeq]);
 
-  // Real "近半年" trend note based on current calendar month vs prior 5 months
-  const trendNote = (() => {
-    const cmKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const cm = stats.byMonth[cmKey];
+  const trendNote = useMemo(() => {
+    const cm = stats.byMonth[currentMonthKey];
     if (!cm || (cm.income === 0 && cm.expense === 0)) {
       return "本月暂无记录 · 开始记一笔";
     }
     const cmNet = cm.income - cm.expense;
+    const [y, m] = currentMonthKey.split("-").map(Number);
     const prevNets: number[] = [];
     for (let i = 1; i <= 5; i++) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const key = monthKey(new Date(y, m - 1 - i, 1));
       const v = stats.byMonth[key];
       if (v && (v.income !== 0 || v.expense !== 0)) {
         prevNets.push(v.income - v.expense);
@@ -1295,28 +1359,31 @@ function LedgerPage({
     if (cmNet >= 0)
       return `本月节余 ${fmtCompact(cmNet)} · 近半年区间 ${fmtCompact(minPrev)} ~ ${fmtCompact(maxPrev)}`;
     return `本月入不敷出 · 缺口 ${fmtCompact(Math.abs(cmNet))}`;
-  })();
+  }, [stats.byMonth, currentMonthKey]);
 
-  // donut data
-  const expenseCats = categories
-    .filter((c) => c.type === "expense" && (stats.byCat[c.id] || 0) > 0)
-    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
-    .sort((a, b) => b.amount - a.amount);
-  const totalExp = expenseCats.reduce((s, c) => s + c.amount, 0) || 1;
+  const expenseBreakdown = useMemo(
+    () => categoryBreakdown(categories, stats.byCat, "expense"),
+    [categories, stats.byCat],
+  );
+  const expenseCats = expenseBreakdown.items;
+  const totalExp = expenseBreakdown.total;
 
-  // heatmap — last 42 days ending today
-  const heatDays: { date: string; value: number }[] = [];
-  for (let i = 41; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(now.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    heatDays.push({ date: key, value: stats.byDay[key] || 0 });
-  }
-  const maxHeat = Math.max(...heatDays.map((d) => d.value), 1);
+  const heatDays = useMemo(() => {
+    const days: { date: string; value: number }[] = [];
+    let max = 1;
+    const reference = new Date(todayKey);
+    for (let i = 41; i >= 0; i--) {
+      const d = new Date(reference);
+      d.setDate(reference.getDate() - i);
+      const key = dateKey(d);
+      const value = stats.byDay[key] || 0;
+      if (value > max) max = value;
+      days.push({ date: key, value });
+    }
+    return { days, max };
+  }, [stats.byDay, todayKey]);
 
-  // receipt rail summary
-  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const monthData = stats.byMonth[monthKey] ?? { income: 0, expense: 0 };
+  const monthData = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
   const monthBalance = monthData.income - monthData.expense;
   const stampDate = `${now.getFullYear()} / ${String(now.getMonth() + 1).padStart(2, "0")} / ${String(now.getDate()).padStart(2, "0")}`;
   const stampTime = now.toLocaleTimeString("zh-CN", {
@@ -1329,9 +1396,9 @@ function LedgerPage({
     <>
       <GreetingStrip
         date={now}
-        todayExpense={todayExpense}
-        weekNet={weekNet}
-        recordedToday={recordedToday}
+        todayExpense={dailyAggregates.todayExpense}
+        weekNet={dailyAggregates.weekNet}
+        recordedToday={dailyAggregates.recordedToday}
         note={trendNote}
       />
 
@@ -1352,20 +1419,20 @@ function LedgerPage({
             <div className="v2-rec-row income">
               <span className="mono">+ 收入</span>
               <span className="v2-rec-num mono">
-                {fmtMoney(monthData.income).slice(1)}
+                {fmtAmount(monthData.income)}
               </span>
             </div>
             <div className="v2-rec-row expense">
               <span className="mono">− 支出</span>
               <span className="v2-rec-num mono">
-                {fmtMoney(monthData.expense).slice(1)}
+                {fmtAmount(monthData.expense)}
               </span>
             </div>
             <div className="v2-rec-rule" />
             <div className="v2-rec-row total">
               <span>结  余</span>
               <span className="v2-rec-num mono">
-                {fmtMoney(monthBalance + openingBalance).slice(1)}
+                {fmtAmount(monthBalance + openingBalance)}
               </span>
             </div>
           </div>
@@ -1414,14 +1481,14 @@ function LedgerPage({
               <div className="v2-stat-label mono">收入 · INCOME</div>
               <CountUp value={stats.income} className="v2-midnum income-c" />
               <div className="v2-stat-foot mono">
-                {records.filter((r) => getCat(r.catId).type === "income").length} 笔
+                {dailyAggregates.incomeCount} 笔
               </div>
             </article>
             <article className="v2-stat-card">
               <div className="v2-stat-label mono">支出 · EXPENSE</div>
               <CountUp value={stats.expense} className="v2-midnum expense-c" />
               <div className="v2-stat-foot mono">
-                {records.filter((r) => getCat(r.catId).type === "expense").length} 笔
+                {dailyAggregates.expenseCount} 笔
               </div>
             </article>
           </section>
@@ -1581,12 +1648,9 @@ function LedgerPage({
               </div>
             </div>
             <div className="v2-heat-grid">
-              {heatDays.map((d) => {
-                const intensity = d.value / maxHeat;
-                let bg = "#F5E6CC";
-                if (intensity > 0.05) bg = "#E8B97A";
-                if (intensity > 0.25) bg = "#C6701D";
-                if (intensity > 0.5) bg = "#7C3A0E";
+              {heatDays.days.map((d) => {
+                const intensity = d.value / heatDays.max;
+                const bg = heatColor(intensity);
                 return (
                   <div
                     key={d.date}
@@ -1666,7 +1730,7 @@ function LedgerPage({
                       }`}
                     >
                       {isIn ? "+" : "−"}
-                      {fmtMoney(r.amount).slice(1)}
+                      {fmtAmount(r.amount)}
                     </div>
                     <div className="v2-entry-actions">
                       <button onClick={() => onEdit(r)} type="button">
@@ -1694,6 +1758,45 @@ function LedgerPage({
 /* =================================================================
    Stats page
 ================================================================= */
+function BreakdownBars({
+  items,
+  total,
+  emptyText,
+}: {
+  items: BreakdownItem[];
+  total: number;
+  emptyText: string;
+}) {
+  if (items.length === 0) {
+    return <div className="v2-empty">{emptyText}</div>;
+  }
+  return (
+    <>
+      {items.map((c) => {
+        const pct = (c.amount / total) * 100;
+        return (
+          <div key={c.id} className="v2-stats-bar">
+            <div className="v2-stats-bar-head">
+              <span>
+                <CatGlyph shape={c.shape} color={c.swatch} size={10} />
+                {c.name}
+              </span>
+              <span className="mono">{fmtMoney(c.amount, 0)}</span>
+            </div>
+            <div className="v2-stats-bar-track">
+              <div
+                className="v2-stats-bar-fill"
+                style={{ width: `${pct}%`, background: c.swatch }}
+              />
+              <span className="mono v2-stats-pct">{pct.toFixed(1)}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function StatsPage({
   records,
   stats,
@@ -1703,42 +1806,81 @@ function StatsPage({
   stats: Stats;
   categories: Category[];
 }) {
-  const expenseCats = categories
-    .filter((c) => c.type === "expense" && (stats.byCat[c.id] || 0) > 0)
-    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
-    .sort((a, b) => b.amount - a.amount);
-  const incomeCats = categories
-    .filter((c) => c.type === "income" && (stats.byCat[c.id] || 0) > 0)
-    .map((c) => ({ ...c, amount: stats.byCat[c.id] || 0 }))
-    .sort((a, b) => b.amount - a.amount);
-  const totalExp = expenseCats.reduce((s, c) => s + c.amount, 0) || 1;
-  const totalInc = incomeCats.reduce((s, c) => s + c.amount, 0) || 1;
-
-  // 6 month series — covers latest activity month even if it's future-dated
-  const now = new Date();
-  const monthSeq = buildMonthSeq(records, now);
-  const monthSeries = monthSeq.map((m) => ({
-    m,
-    income: stats.byMonth[m]?.income ?? 0,
-    expense: stats.byMonth[m]?.expense ?? 0,
-  }));
-  const maxM = Math.max(
-    ...monthSeries.flatMap((s) => [s.income, s.expense]),
-    1,
+  const catsById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c])),
+    [categories],
   );
-  const nets = monthSeries.map((s) => s.income - s.expense);
-  const maxNet = Math.max(...nets.map(Math.abs), 1);
 
-  // day-of-week
-  const dow = [0, 0, 0, 0, 0, 0, 0];
-  records.forEach((r) => {
-    const c = categories.find((x) => x.id === r.catId);
-    if (c?.type === "expense") {
-      dow[new Date(r.date).getDay()] += r.amount;
+  const expenseBreakdown = useMemo(
+    () => categoryBreakdown(categories, stats.byCat, "expense"),
+    [categories, stats.byCat],
+  );
+  const incomeBreakdown = useMemo(
+    () => categoryBreakdown(categories, stats.byCat, "income"),
+    [categories, stats.byCat],
+  );
+  const expenseCats = expenseBreakdown.items;
+  const incomeCats = incomeBreakdown.items;
+  const totalExp = expenseBreakdown.total;
+  const totalInc = incomeBreakdown.total;
+
+  const currentMonthKey = monthKey(new Date());
+  const monthSeq = useMemo(
+    () => buildMonthSeq(records, new Date(currentMonthKey + "-01")),
+    [records, currentMonthKey],
+  );
+  const monthSeries = useMemo(
+    () =>
+      monthSeq.map((m) => ({
+        m,
+        income: stats.byMonth[m]?.income ?? 0,
+        expense: stats.byMonth[m]?.expense ?? 0,
+      })),
+    [monthSeq, stats.byMonth],
+  );
+  const { maxM, maxNet } = useMemo(() => {
+    let max = 1;
+    let netMax = 1;
+    for (const s of monthSeries) {
+      if (s.income > max) max = s.income;
+      if (s.expense > max) max = s.expense;
+      const absNet = Math.abs(s.income - s.expense);
+      if (absNet > netMax) netMax = absNet;
     }
-  });
-  const maxDow = Math.max(...dow, 1);
-  const dowLabel = ["日", "一", "二", "三", "四", "五", "六"];
+    return { maxM: max, maxNet: netMax };
+  }, [monthSeries]);
+
+  const yNet = (net: number) =>
+    net >= 0 ? 200 - (net / maxNet) * 120 : 200 + (-net / maxNet) * 70;
+
+  const incomeStats = useMemo(() => {
+    let max: RecordItem | null = null;
+    let total = 0;
+    let count = 0;
+    for (const r of records) {
+      if (catsById.get(r.catId)?.type !== "income") continue;
+      total += r.amount;
+      count += 1;
+      if (!max || r.amount > max.amount) max = r;
+    }
+    return { max, mean: count === 0 ? 0 : total / count };
+  }, [records, catsById]);
+
+  const { dow, maxDow, peakDow } = useMemo(() => {
+    const buckets = [0, 0, 0, 0, 0, 0, 0];
+    for (const r of records) {
+      if (catsById.get(r.catId)?.type === "expense") {
+        buckets[new Date(r.date).getDay()] += r.amount;
+      }
+    }
+    let max = 1;
+    let peak = 0;
+    for (let i = 0; i < buckets.length; i++) {
+      if (buckets[i] > max) max = buckets[i];
+      if (buckets[i] > buckets[peak]) peak = i;
+    }
+    return { dow: buckets, maxDow: max, peakDow: peak };
+  }, [records, catsById]);
 
   const savingRate = stats.income > 0 ? (stats.balance / stats.income) * 100 : 0;
   const ratio = stats.expense > 0 ? stats.income / stats.expense : 0;
@@ -1880,55 +2022,39 @@ function StatsPage({
                   );
                 })}
                 {/* Net line — signed: positive goes up, negative goes down */}
-                {(() => {
-                  const yNet = (net: number) => {
-                    if (net >= 0) return 200 - (net / maxNet) * 120;
-                    return 200 + (-net / maxNet) * 70;
-                  };
+                <path
+                  d={monthSeries
+                    .map((s, i) => {
+                      const x = 80 + i * 130;
+                      const y = yNet(s.income - s.expense);
+                      return `${i === 0 ? "M" : "L"}${x},${y}`;
+                    })
+                    .join(" ")}
+                  fill="none"
+                  stroke="#7C3A0E"
+                  strokeWidth="2"
+                />
+                {monthSeries.map((s, i) => {
+                  const x = 80 + i * 130;
+                  const net = s.income - s.expense;
+                  const y = yNet(net);
                   return (
-                    <>
-                      <path
-                        d={monthSeries
-                          .map((s, i) => {
-                            const x = 80 + i * 130;
-                            const y = yNet(s.income - s.expense);
-                            return `${i === 0 ? "M" : "L"}${x},${y}`;
-                          })
-                          .join(" ")}
-                        fill="none"
-                        stroke="#7C3A0E"
-                        strokeWidth="2"
-                      />
-                      {monthSeries.map((s, i) => {
-                        const x = 80 + i * 130;
-                        const net = s.income - s.expense;
-                        const y = yNet(net);
-                        const fill =
-                          net > 0
-                            ? "#5C7C2C"
-                            : net < 0
-                              ? "#7C3A0E"
-                              : "#FAF3E2";
-                        return (
-                          <circle
-                            key={i}
-                            cx={x}
-                            cy={y}
-                            r="4"
-                            fill={fill}
-                            stroke="#7C3A0E"
-                            strokeWidth="2"
-                          >
-                            <title>
-                              {s.m} 净结余 {net >= 0 ? "+" : "−"}
-                              {fmtCompact(Math.abs(net))}
-                            </title>
-                          </circle>
-                        );
-                      })}
-                    </>
+                    <circle
+                      key={i}
+                      cx={x}
+                      cy={y}
+                      r="4"
+                      fill={netColor(net)}
+                      stroke="#7C3A0E"
+                      strokeWidth="2"
+                    >
+                      <title>
+                        {s.m} 净结余 {net >= 0 ? "+" : "−"}
+                        {fmtCompact(Math.abs(net))}
+                      </title>
+                    </circle>
                   );
-                })()}
+                })}
                 {/* Month labels — at the bottom, below negative-net area */}
                 {monthSeries.map((s, i) => {
                   const x = 80 + i * 130;
@@ -1962,36 +2088,11 @@ function StatsPage({
                 </div>
               </div>
               <div className="v2-stats-bars">
-                {expenseCats.map((c) => {
-                  const pct = (c.amount / totalExp) * 100;
-                  return (
-                    <div key={c.id} className="v2-stats-bar">
-                      <div className="v2-stats-bar-head">
-                        <span>
-                          <CatGlyph
-                            shape={c.shape}
-                            color={c.swatch}
-                            size={10}
-                          />
-                          {c.name}
-                        </span>
-                        <span className="mono">{fmtMoney(c.amount, 0)}</span>
-                      </div>
-                      <div className="v2-stats-bar-track">
-                        <div
-                          className="v2-stats-bar-fill"
-                          style={{ width: `${pct}%`, background: c.swatch }}
-                        />
-                        <span className="mono v2-stats-pct">
-                          {pct.toFixed(1)}%
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-                {expenseCats.length === 0 && (
-                  <div className="v2-empty">暂无支出数据</div>
-                )}
+                <BreakdownBars
+                  items={expenseCats}
+                  total={totalExp}
+                  emptyText="暂无支出数据"
+                />
               </div>
             </div>
 
@@ -2003,71 +2104,25 @@ function StatsPage({
                 </div>
               </div>
               <div className="v2-stats-bars">
-                {incomeCats.map((c) => {
-                  const pct = (c.amount / totalInc) * 100;
-                  return (
-                    <div key={c.id} className="v2-stats-bar">
-                      <div className="v2-stats-bar-head">
-                        <span>
-                          <CatGlyph
-                            shape={c.shape}
-                            color={c.swatch}
-                            size={10}
-                          />
-                          {c.name}
-                        </span>
-                        <span className="mono">{fmtMoney(c.amount, 0)}</span>
-                      </div>
-                      <div className="v2-stats-bar-track">
-                        <div
-                          className="v2-stats-bar-fill"
-                          style={{ width: `${pct}%`, background: c.swatch }}
-                        />
-                        <span className="mono v2-stats-pct">
-                          {pct.toFixed(1)}%
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-                {incomeCats.length === 0 && (
-                  <div className="v2-empty">暂无收入数据</div>
-                )}
+                <BreakdownBars
+                  items={incomeCats}
+                  total={totalInc}
+                  emptyText="暂无收入数据"
+                />
               </div>
               {incomeCats.length > 0 && (
                 <div className="v2-stats-side">
                   <div className="v2-stats-side-row">
                     <span className="mono">最大单笔收入</span>
                     <span>
-                      {(() => {
-                        const incomeRecs = records.filter(
-                          (r) =>
-                            categories.find((c) => c.id === r.catId)?.type ===
-                            "income",
-                        );
-                        if (incomeRecs.length === 0) return "—";
-                        const max = incomeRecs.reduce((m, r) =>
-                          r.amount > m.amount ? r : m,
-                        );
-                        const c = categories.find((x) => x.id === max.catId);
-                        return `${c?.name ?? "未分类"} · ${fmtMoney(max.amount, 0)}`;
-                      })()}
+                      {incomeStats.max
+                        ? `${catsById.get(incomeStats.max.catId)?.name ?? "未分类"} · ${fmtMoney(incomeStats.max.amount, 0)}`
+                        : "—"}
                     </span>
                   </div>
                   <div className="v2-stats-side-row">
                     <span className="mono">平均单笔收入</span>
-                    <span>
-                      {fmtMoney(
-                        records
-                          .filter(
-                            (r) =>
-                              categories.find((c) => c.id === r.catId)?.type ===
-                              "income",
-                          )
-                          .reduce((s, r, _, a) => s + r.amount / a.length, 0),
-                        0,
-                      )}
-                    </span>
+                    <span>{fmtMoney(incomeStats.mean, 0)}</span>
                   </div>
                 </div>
               )}
@@ -2081,12 +2136,7 @@ function StatsPage({
                 <h3>周 内 支 出 分 布</h3>
                 <div className="mono">BY DAY OF WEEK</div>
               </div>
-              <div className="mono">
-                {(() => {
-                  const peak = dow.indexOf(Math.max(...dow));
-                  return `周${dowLabel[peak]} 支出最高`;
-                })()}
-              </div>
+              <div className="mono">周{DOW_LABEL[peakDow]} 支出最高</div>
             </div>
             <div className="v2-dow">
               {dow.map((v, i) => {
@@ -2099,7 +2149,7 @@ function StatsPage({
                       </span>
                       <div className="v2-dow-bar" style={{ height: h }} />
                     </div>
-                    <div className="v2-dow-label">周 {dowLabel[i]}</div>
+                    <div className="v2-dow-label">周 {DOW_LABEL[i]}</div>
                   </div>
                 );
               })}
@@ -2134,8 +2184,18 @@ function CategoriesPage({
     swatch: PALETTE[0],
   });
 
-  const exp = categories.filter((c) => c.type === "expense");
-  const inc = categories.filter((c) => c.type === "income");
+  const { exp, inc, countByCat } = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const r of records) {
+      counts[r.catId] = (counts[r.catId] || 0) + 1;
+    }
+    const expense: Category[] = [];
+    const income: Category[] = [];
+    for (const c of categories) {
+      (c.type === "expense" ? expense : income).push(c);
+    }
+    return { exp: expense, inc: income, countByCat: counts };
+  }, [categories, records]);
 
   function submit() {
     if (!form.name.trim()) return;
@@ -2273,7 +2333,7 @@ function CategoriesPage({
               <CategoryList
                 cats={exp}
                 stats={stats}
-                records={records}
+                countByCat={countByCat}
                 onDelete={onDelete}
               />
             </div>
@@ -2287,7 +2347,7 @@ function CategoriesPage({
               <CategoryList
                 cats={inc}
                 stats={stats}
-                records={records}
+                countByCat={countByCat}
                 onDelete={onDelete}
               />
             </div>
@@ -2301,12 +2361,12 @@ function CategoriesPage({
 function CategoryList({
   cats,
   stats,
-  records,
+  countByCat,
   onDelete,
 }: {
   cats: Category[];
   stats: Stats;
-  records: RecordItem[];
+  countByCat: Record<string, number>;
   onDelete: (id: string) => void;
 }) {
   if (cats.length === 0)
@@ -2315,8 +2375,8 @@ function CategoryList({
     <div className="v2-cat-list-2">
       {cats.map((c) => {
         const amount = stats.byCat[c.id] || 0;
-        const count = records.filter((r) => r.catId === c.id).length;
-        const isDefault = DEFAULT_CATEGORIES.some((d) => d.id === c.id);
+        const count = countByCat[c.id] || 0;
+        const isDefault = DEFAULT_CATEGORY_IDS.has(c.id);
         return (
           <div key={c.id} className="v2-cat-card">
             <div className="v2-cat-card-l">
@@ -2512,7 +2572,10 @@ function NewRecordModal({
     });
   }
 
-  const recordNo = `${form.date.replace(/-/g, "-")}-${String(Math.floor(Math.random() * 900) + 100)}`;
+  const recordNo = useMemo(
+    () => `${form.date}-${String(Math.floor(Math.random() * 900) + 100)}`,
+    [form.date],
+  );
 
   return (
     <div className="v2-modal-stage" role="dialog" aria-modal="true">

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 
 use tauri::{AppHandle, Manager};
 
@@ -25,27 +25,38 @@ fn legacy_accounting_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(ACCOUNTING_STORE_FILE))
 }
 
+fn read_optional(path: &PathBuf) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[tauri::command]
 fn load_accounting_store(app: AppHandle) -> Result<String, String> {
     let path = accounting_store_path(&app)?;
-    if !path.exists() {
-        let legacy_path = legacy_accounting_store_path(&app)?;
-        if legacy_path.exists() {
-            let payload = fs::read_to_string(&legacy_path).map_err(|error| error.to_string())?;
-            fs::write(&path, &payload).map_err(|error| error.to_string())?;
-            return Ok(payload);
-        }
-
-        return Ok(String::new());
+    if let Some(payload) = read_optional(&path)? {
+        return Ok(payload);
     }
+    let legacy_path = legacy_accounting_store_path(&app)?;
+    let Some(payload) = read_optional(&legacy_path)? else {
+        return Ok(String::new());
+    };
+    atomic_write(&path, payload.as_bytes())?;
+    Ok(payload)
+}
 
-    fs::read_to_string(path).map_err(|error| error.to_string())
+fn atomic_write(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
+    fs::rename(&tmp, path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn save_accounting_store(app: AppHandle, payload: String) -> Result<(), String> {
     let path = accounting_store_path(&app)?;
-    fs::write(path, payload).map_err(|error| error.to_string())
+    atomic_write(&path, payload.as_bytes())
 }
 
 #[tauri::command]
