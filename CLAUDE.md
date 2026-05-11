@@ -56,12 +56,23 @@ Almost the entire app lives in `src/App.tsx` — top-level `App` component plus 
 `loadAccountingData` / `saveAccountingData` try Tauri commands first; on failure (e.g. running in plain browser via `pnpm dev`) they fall back to `localStorage`. This lets you iterate UI in a browser without launching the desktop shell.
 
 - **Save is debounced** (300 ms) in the App's persist `useEffect`. Bursts of edits coalesce into one write — preserve this when refactoring the persist effect; don't move the work inline.
-- **Save is atomic on the Rust side**: `save_accounting_store` writes to `accounting-data.json.tmp` then `fs::rename`s over the target. The user's ledger is irreplaceable, so don't replace this with a plain `fs::write`.
+- **Save is atomic on the Rust side**: `save_accounting_store` writes to `accounting-data.json.tmp`, calls `sync_all` on the temp file, then `fs::rename`s over the target. The user's ledger is irreplaceable; don't drop the fsync or replace this with a plain `fs::write`.
 - **Save only writes the consolidated localStorage key** (`accounting.file-store-fallback`). The three legacy split keys (`accounting.records` etc.) are still *read* by `loadFallback` for one-shot migration of old browser data, but never written.
+- **`saveAccountingData` returns a `SaveResult`** — `{ ok: true } | { ok: false; error }`. A module-level `tauriAvailable` flag distinguishes "Tauri actually failed" (surface as `backupStatus` error banner) from "we're in a browser and Tauri was never available" (silent fallback). Don't go back to the older `void`-returning shape.
+
+**Close-window flush — don't regress this.** Closing the desktop window must not drop the last edit, even when the 300 ms debounce hasn't fired or its invoke is still in flight. The persist effect tracks two things via refs:
+- `pendingSaveRef` — the debounce `setTimeout` handle.
+- `inFlightSaveRef` — a `Promise<SaveResult>` for the currently-running `saveAccountingData` invoke (set when the debounce callback fires; cleared in `.finally`).
+
+A second `useEffect` registers two listeners:
+- `getCurrentWindow().onCloseRequested` (via dynamic `import("@tauri-apps/api/window")` so the browser build doesn't blow up) — `event.preventDefault()`, run `flushSave()` (drain `pendingSaveRef` then `await inFlightSaveRef`), `window.confirm` on save failure, then `win.close()`. A `closingRef` guards reentry from the second close-requested event that `win.close()` triggers.
+- `beforeunload` — pure browser-mode fallback. Synchronously clears the timer and calls `saveFallbackJson(FALLBACK_STORAGE_KEY, latestDataRef.current)` directly (NOT `saveAccountingData`, because its first `await` schedules the localStorage write into a microtask the tab won't live to run). Tauri webview doesn't fire `beforeunload` on close, so the two paths don't double-write.
+
+If you touch the persist effect, keep `latestDataRef` / `pendingSaveRef` / `inFlightSaveRef` / `storageLoadedRef` / `closingRef` and the `runSave()` helper that wires the invoke promise into `inFlightSaveRef` — they're the contract the close handler relies on.
 
 The Rust side (`src-tauri/src/lib.rs`) exposes three commands:
 - `load_accounting_store` — reads `~/Desktop/王源专属记账工作台的文件夹/accounting-data.json`. Auto-migrates from legacy `app_data_dir` location on first read.
-- `save_accounting_store` — atomic write via tmp + rename.
+- `save_accounting_store` — atomic write via tmp + fsync + rename (see `atomic_write` helper, which takes `&Path` so callers can pass either `&Path` or `&PathBuf` through Deref).
 - `save_excel_backup` — drops a sanitized `.xlsx` into the same workspace folder.
 
 When you change `PersistedAccountingData` shape, update both the TS type AND the load/save migration logic — the file may contain older shapes from prior versions. The `migrateCategory` helper handles category-shape evolution.
@@ -93,8 +104,8 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 - `fmtMoney(n, decimals=2)` — `"¥" + fmtAmount(...)`, full `¥12,345.67` form. (Don't write `fmtMoney(x).slice(1)` to strip the prefix — call `fmtAmount` directly.)
 - `fmtCompact(n)` — abbreviated `1.2M` / `45.6K` / `89` for chart labels and the donut center. Use this anywhere a number could grow large (≥1M) and squeeze its container.
 - `splitMoney(n)` — for big-typography splits like `¥48,290`+`.00`, used by `CountUp`.
-- `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. Use these instead of inlining `toISOString().slice(0,10)` or `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`.
-- `buildMonthSeq(records, now)` — produces 6 month-keys ending at `max(currentMonth, latestRecordMonth)`, so charts include future-dated entries the user has manually entered. Both `LedgerPage` and `StatsPage` go through this.
+- `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. **Both use local-timezone `getFullYear/Month/Date` parts**, not `toISOString().slice(...)` — going back to UTC silently shifts records created in the early morning (UTC+8) onto the wrong day. `parseExcelDate` also routes through `dateKey` for the same reason. Use these helpers; don't reinline the formatting.
+- `buildMonthSeq(records, anchor)` — takes a `monthKey` string anchor (e.g. `currentMonthKey`), not a `Date`. Produces 6 month-keys ending at `max(anchor, latestRecordMonth)`, so charts include future-dated entries. Both `LedgerPage` and `StatsPage` go through this. Passing a `Date` constructed from `new Date(monthKey + "-01")` was a UTC-parsing trap in earlier versions — keep the string interface.
 - `categoryBreakdown(cats, byCat, type)` — returns `{ items, total }` filtered to the given type, sorted by amount desc, with `total` clamped to `1` to keep `amount/total` divisions safe. Used by both pages' donut and bar charts.
 - `BreakdownBars` component — renders the stats-bar list. Both expense and income breakdowns share it; don't reinline.
 - `heatColor(intensity)` / `netColor(net)` — color-threshold lookups for the heatmap and the net-line chart dots. Don't re-implement the cascading `if`-chain inline.
@@ -103,6 +114,8 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 ### Memo discipline
 
 `LedgerPage` and `StatsPage` cache derived data with `useMemo` keyed on **string keys** (`todayKey`, `currentMonthKey`) rather than the `now: Date` object. `now = new Date()` runs fresh per render, but the heavy memos only invalidate when the date string actually changes — so re-renders from filter clicks or modal toggles don't recompute monthSeq/heatDays/dailyAggregates. If you add a memo that depends on "today", depend on `todayKey`, never on `now`.
+
+Inside those memos, reconstruct a working `Date` from the key with `new Date(y, m-1, d)` (parts) — not `new Date(todayKey)` or `new Date(monthKey + "-01")`. The string form is parsed as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones; the heatmap/`dailyAggregates`/`buildMonthSeq` call sites all use the parts form.
 
 ### Greeting / trend copy is data-driven
 

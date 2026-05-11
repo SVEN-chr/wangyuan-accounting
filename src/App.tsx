@@ -153,7 +153,8 @@ const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
    Helpers
 ================================================================= */
 
-const dateKey = (d: Date) => d.toISOString().slice(0, 10);
+const dateKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const today = () => dateKey(new Date());
 const monthKey = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -198,8 +199,8 @@ const netColor = (net: number): string =>
 
 const DOW_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
 
-function buildMonthSeq(records: RecordItem[], now: Date): string[] {
-  let endMonth = monthKey(now);
+function buildMonthSeq(records: RecordItem[], anchor: string): string[] {
+  let endMonth = anchor;
   for (const r of records) {
     const m = r.date.slice(0, 7);
     if (m && m > endMonth) endMonth = m;
@@ -270,9 +271,12 @@ function loadFallback(): PersistedAccountingData {
   });
 }
 
+let tauriAvailable: boolean | null = null;
+
 async function loadAccountingData(): Promise<PersistedAccountingData> {
   try {
     const raw = await invoke<string>("load_accounting_store");
+    tauriAvailable = true;
     if (!raw) return loadFallback();
     const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
     const fb = loadFallback();
@@ -288,15 +292,26 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
           : fb.openingBalance,
     };
   } catch {
+    tauriAvailable = false;
     return loadFallback();
   }
 }
 
-async function saveAccountingData(data: PersistedAccountingData) {
+type SaveResult = { ok: true } | { ok: false; error: string };
+
+async function saveAccountingData(
+  data: PersistedAccountingData,
+): Promise<SaveResult> {
   try {
     await invoke("save_accounting_store", { payload: JSON.stringify(data) });
-  } catch {
+    tauriAvailable = true;
+    return { ok: true };
+  } catch (error) {
     saveFallbackJson(FALLBACK_STORAGE_KEY, data);
+    if (tauriAvailable) {
+      return { ok: false, error: String(error) };
+    }
+    return { ok: true };
   }
 }
 
@@ -341,7 +356,7 @@ function parseExcelRecordId(value: unknown, fallback: number) {
 
 function parseExcelDate(value: unknown) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10);
+    return dateKey(value);
   }
   if (typeof value === "number" && Number.isFinite(value)) {
     const parsed = (XLSX.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
@@ -624,14 +639,129 @@ function App() {
     };
   }, []);
 
-  /* ---- persist (debounced — bursts of edits coalesce) ---- */
+  /* ---- persist (debounced; flushed on Tauri close-requested + browser beforeunload) ---- */
+  const latestDataRef = useRef<PersistedAccountingData>({
+    records,
+    categories,
+    openingBalance,
+  });
+  const pendingSaveRef = useRef<number | null>(null);
+  const inFlightSaveRef = useRef<Promise<SaveResult> | null>(null);
+  const storageLoadedRef = useRef(false);
+  const closingRef = useRef(false);
+
+  useEffect(() => {
+    latestDataRef.current = { records, categories, openingBalance };
+  }, [records, categories, openingBalance]);
+
+  useEffect(() => {
+    storageLoadedRef.current = storageLoaded;
+  }, [storageLoaded]);
+
+  function runSave(): Promise<SaveResult> {
+    const promise = saveAccountingData(latestDataRef.current).then((result) => {
+      if (!result.ok) {
+        setBackupStatus({
+          type: "error",
+          message: `保存失败：${result.error} · 已写入本地缓存`,
+        });
+      }
+      return result;
+    });
+    const tracked = promise.finally(() => {
+      if (inFlightSaveRef.current === tracked) {
+        inFlightSaveRef.current = null;
+      }
+    });
+    inFlightSaveRef.current = tracked;
+    return promise;
+  }
+
   useEffect(() => {
     if (!storageLoaded) return;
-    const handle = window.setTimeout(() => {
-      void saveAccountingData({ records, categories, openingBalance });
+    if (pendingSaveRef.current !== null) {
+      window.clearTimeout(pendingSaveRef.current);
+    }
+    pendingSaveRef.current = window.setTimeout(() => {
+      pendingSaveRef.current = null;
+      void runSave();
     }, 300);
-    return () => window.clearTimeout(handle);
+    return () => {
+      if (pendingSaveRef.current !== null) {
+        window.clearTimeout(pendingSaveRef.current);
+        pendingSaveRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [records, categories, openingBalance, storageLoaded]);
+
+  useEffect(() => {
+    async function flushSave(): Promise<SaveResult | null> {
+      if (!storageLoadedRef.current) return null;
+      if (pendingSaveRef.current !== null) {
+        window.clearTimeout(pendingSaveRef.current);
+        pendingSaveRef.current = null;
+        void runSave();
+      }
+      const pending = inFlightSaveRef.current;
+      if (pending) {
+        try {
+          return await pending;
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }
+
+    const onBeforeUnload = () => {
+      if (pendingSaveRef.current !== null) {
+        window.clearTimeout(pendingSaveRef.current);
+        pendingSaveRef.current = null;
+      }
+      if (storageLoadedRef.current) {
+        saveFallbackJson(FALLBACK_STORAGE_KEY, latestDataRef.current);
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const mod = await import("@tauri-apps/api/window");
+        if (cancelled) return;
+        const win = mod.getCurrentWindow();
+        const off = await win.onCloseRequested(async (event) => {
+          if (closingRef.current) return;
+          event.preventDefault();
+          const result = await flushSave();
+          if (result && !result.ok) {
+            const proceed = window.confirm(
+              `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`,
+            );
+            if (!proceed) return;
+          }
+          closingRef.current = true;
+          await win.close();
+        });
+        if (cancelled) {
+          off();
+          return;
+        }
+        unlisten = off;
+      } catch {
+        /* 浏览器模式 / Tauri API 不可用 —— beforeunload 兜底足够 */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* ---- derived ---- */
   const catsById = useMemo(
@@ -1284,7 +1414,8 @@ function LedgerPage({
   const currentMonthKey = monthKey(now);
 
   const dailyAggregates = useMemo(() => {
-    const reference = new Date(todayKey);
+    const [ty, tm, td] = todayKey.split("-").map(Number);
+    const reference = new Date(ty, tm - 1, td);
     reference.setDate(reference.getDate() - 6);
     const weekStartKey = dateKey(reference);
     let todayExpense = 0;
@@ -1309,7 +1440,7 @@ function LedgerPage({
 
   // 6-month series — covers up to latest activity month (handles future-dated records)
   const monthSeq = useMemo(
-    () => buildMonthSeq(records, new Date(currentMonthKey + "-01")),
+    () => buildMonthSeq(records, currentMonthKey),
     [records, currentMonthKey],
   );
 
@@ -1371,10 +1502,9 @@ function LedgerPage({
   const heatDays = useMemo(() => {
     const days: { date: string; value: number }[] = [];
     let max = 1;
-    const reference = new Date(todayKey);
+    const [ty, tm, td] = todayKey.split("-").map(Number);
     for (let i = 41; i >= 0; i--) {
-      const d = new Date(reference);
-      d.setDate(reference.getDate() - i);
+      const d = new Date(ty, tm - 1, td - i);
       const key = dateKey(d);
       const value = stats.byDay[key] || 0;
       if (value > max) max = value;
@@ -1826,7 +1956,7 @@ function StatsPage({
 
   const currentMonthKey = monthKey(new Date());
   const monthSeq = useMemo(
-    () => buildMonthSeq(records, new Date(currentMonthKey + "-01")),
+    () => buildMonthSeq(records, currentMonthKey),
     [records, currentMonthKey],
   );
   const monthSeries = useMemo(
@@ -2572,9 +2702,8 @@ function NewRecordModal({
     });
   }
 
-  const recordNo = useMemo(
+  const [recordNo] = useState(
     () => `${form.date}-${String(Math.floor(Math.random() * 900) + 100)}`,
-    [form.date],
   );
 
   return (

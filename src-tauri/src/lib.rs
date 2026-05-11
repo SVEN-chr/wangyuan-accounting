@@ -1,4 +1,8 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 use tauri::{AppHandle, Manager};
 
@@ -25,7 +29,7 @@ fn legacy_accounting_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(ACCOUNTING_STORE_FILE))
 }
 
-fn read_optional(path: &PathBuf) -> Result<Option<String>, String> {
+fn read_optional(path: &Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -47,9 +51,13 @@ fn load_accounting_store(app: AppHandle) -> Result<String, String> {
     Ok(payload)
 }
 
-fn atomic_write(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
+    {
+        let mut file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
+        file.write_all(bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
     fs::rename(&tmp, path).map_err(|error| error.to_string())
 }
 
