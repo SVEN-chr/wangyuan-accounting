@@ -17,6 +17,7 @@
   --v2-terra-soft: #e8b97a;
   --v2-olive: #5c7c2c;
   --v2-cream: #f5e6cc;
+  --v2-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
 
   color: var(--v2-ink);
   background: var(--v2-bg);
@@ -81,7 +82,7 @@ button {
 
 /* Mono utility */
 .mono {
-  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-family: var(--v2-mono);
   font-feature-settings: "tnum" on;
   letter-spacing: 0.05em;
   font-size: 11px;
@@ -166,7 +167,7 @@ button {
   padding-left: 0;
 }
 .v2-greet-num {
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 24px;
   color: var(--v2-ink);
   margin-top: 6px;
@@ -247,7 +248,7 @@ button {
   padding: 8px 12px;
   background: var(--v2-paper-2);
   border: 1px solid var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 11px;
   cursor: pointer;
   color: var(--v2-ink);
@@ -396,7 +397,7 @@ button {
   background: var(--v2-paper-2);
   border: 1px solid var(--v2-ink);
   padding: 4px 8px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 16px;
   color: var(--v2-ink);
   font-variant-numeric: tabular-nums;
@@ -491,7 +492,7 @@ button {
 .v2-stat-label {
   font-size: 10px;
   letter-spacing: 0.2em;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   text-transform: uppercase;
   color: var(--v2-ink-mute);
 }
@@ -501,7 +502,7 @@ button {
 
 /* Big-number typography */
 .v2-bignum {
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 64px;
   line-height: 1;
   letter-spacing: -0.02em;
@@ -524,7 +525,7 @@ button {
   opacity: 0.55;
 }
 .v2-midnum {
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 32px;
   line-height: 1.3;
   letter-spacing: -0.01em;
@@ -543,7 +544,7 @@ button {
 }
 .v2-stat-foot {
   margin-top: 8px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 11px;
   letter-spacing: 0.05em;
   color: var(--v2-ink-mute);
@@ -560,7 +561,7 @@ button {
   padding: 4px 10px;
   background: var(--v2-olive);
   color: var(--v2-paper);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 12px;
   letter-spacing: 0.05em;
 }
@@ -608,7 +609,7 @@ button {
   align-items: center;
   font-size: 10px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -689,7 +690,7 @@ button {
 .v2-bar-label {
   font-size: 10px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 
 /* Donut */
@@ -715,7 +716,7 @@ button {
 .v2-tag {
   font-size: 9px;
   letter-spacing: 0.2em;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   color: var(--v2-ink-mute);
   text-transform: uppercase;
 }
@@ -723,7 +724,7 @@ button {
   font-size: 32px;
   color: var(--v2-ink);
   font-variant-numeric: tabular-nums;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   max-width: 130px;
   text-align: center;
   white-space: nowrap;
@@ -759,13 +760,13 @@ button {
 .v2-leg-pct {
   color: var(--v2-ink-mute);
   font-size: 11px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-leg-amt {
   font-size: 12px;
   color: var(--v2-ink);
   font-variant-numeric: tabular-nums;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 
 /* Heatmap */
@@ -780,7 +781,7 @@ button {
   gap: 4px;
   font-size: 10px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-heat-cell {
   display: inline-block;
@@ -826,7 +827,7 @@ button {
   padding: 6px 14px;
   background: var(--v2-paper-2);
   border: 1px solid var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 11px;
   cursor: pointer;
   color: var(--v2-ink);
@@ -856,11 +857,11 @@ button {
 .v2-entry-no {
   font-size: 11px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-entry-date {
   line-height: 1.1;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-entry-date .d {
   font-size: 22px;
@@ -886,7 +887,7 @@ button {
   font-size: 11px;
   color: var(--v2-ink-mute);
   margin-top: 2px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -898,7 +899,7 @@ button {
   font-size: 10px;
   text-align: center;
   justify-self: start;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   color: var(--v2-ink-mute);
   letter-spacing: 0.1em;
 }
@@ -906,7 +907,7 @@ button {
   font-size: 18px;
   text-align: right;
   font-variant-numeric: tabular-nums;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-entry-actions {
   display: flex;
@@ -921,7 +922,7 @@ button {
   padding: 4px 10px;
   background: var(--v2-paper);
   border: 1px solid var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 10px;
   letter-spacing: 0.05em;
   color: var(--v2-ink);
@@ -1046,7 +1047,7 @@ button {
   color: var(--v2-ink-soft);
   white-space: nowrap;
   padding-bottom: 4px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-dow-label {
   font-size: 13px;
@@ -1068,7 +1069,7 @@ button {
 }
 .v2-cat-form-field label {
   font-size: 11px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   color: var(--v2-ink-mute);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1181,7 +1182,7 @@ button {
   font-size: 11px;
   margin-top: 3px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   text-transform: none;
 }
 .v2-cat-card-r {
@@ -1192,7 +1193,7 @@ button {
   padding: 6px 12px;
   background: var(--v2-paper);
   border: 1px solid var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 11px;
   cursor: pointer;
   color: var(--v2-ink);
@@ -1218,7 +1219,7 @@ button {
   background: var(--v2-cream);
   color: var(--v2-ink-mute);
   letter-spacing: 0.05em;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 
 /* =================================================================
@@ -1242,7 +1243,7 @@ button {
 .v2-backup-tag {
   font-size: 11px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   letter-spacing: 0.2em;
 }
 .v2-backup-h {
@@ -1271,7 +1272,7 @@ button {
   font-size: 11px;
 }
 .v2-backup-num {
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 20px;
   margin-top: 4px;
   color: var(--v2-ink);
@@ -1367,13 +1368,13 @@ button {
   font-size: 11px;
   margin-top: 2px;
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
 }
 .v2-backup-status {
   font-size: 12px;
   padding: 10px 14px;
   border: 1px dashed var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   letter-spacing: 0.05em;
 }
 .v2-backup-status.success {
@@ -1508,7 +1509,7 @@ button {
   position: absolute;
   left: 0;
   top: 26px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 28px;
   color: var(--v2-terra-deep);
 }
@@ -1516,7 +1517,7 @@ button {
   background: transparent;
   border: 0;
   padding: 8px 0 8px 32px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 56px;
   color: var(--v2-ink);
   outline: none;
@@ -1535,7 +1536,7 @@ button {
   padding: 12px;
   background: var(--v2-paper-2);
   border: 1px solid var(--v2-rule);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 18px;
   cursor: pointer;
   transition: all 0.1s;
@@ -1552,7 +1553,7 @@ button {
 .v2-modal-label {
   font-size: 11px;
   margin-bottom: 8px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   color: var(--v2-ink-mute);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1647,7 +1648,7 @@ button {
 }
 .v2-confirm-list dt {
   color: var(--v2-ink-mute);
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1667,7 +1668,7 @@ button {
   text-align: center;
   color: var(--v2-ink-mute);
   font-size: 13px;
-  font-family: "JetBrains Mono", monospace;
+  font-family: var(--v2-mono);
   letter-spacing: 0.05em;
 }
 

@@ -56,6 +56,8 @@ Almost the entire app lives in `src/App.tsx` — top-level `App` component plus 
 `loadAccountingData` / `saveAccountingData` try Tauri commands first; on failure (e.g. running in plain browser via `pnpm dev`) they fall back to `localStorage`. This lets you iterate UI in a browser without launching the desktop shell.
 
 - **Save is debounced** (300 ms) in the App's persist `useEffect`. Bursts of edits coalesce into one write — preserve this when refactoring the persist effect; don't move the work inline.
+- **First post-load tick is skipped** via `persistedSinceLoadRef`. The load handler calls `setRecords`/`setCategories`/`setOpeningBalance` with the values just read off disk; without the guard, the very next render would queue a debounced save that writes back the identical bytes (one wasted `atomic_write` + fsync per launch). Don't remove this skip; the close-handler still works because `flushSave()` only awaits an actually-pending invoke.
+- **`latestDataRef` is updated on the persist effect's first line**, before any `storageLoaded` gate or skip-tick early return. The close handler and `beforeunload` listener depend on it always reflecting the most recent state, even before the first real save fires.
 - **Save is atomic on the Rust side**: `save_accounting_store` writes to `accounting-data.json.tmp`, calls `sync_all` on the temp file, then `fs::rename`s over the target. The user's ledger is irreplaceable; don't drop the fsync or replace this with a plain `fs::write`.
 - **Save only writes the consolidated localStorage key** (`accounting.file-store-fallback`). The three legacy split keys (`accounting.records` etc.) are still *read* by `loadFallback` for one-shot migration of old browser data, but never written.
 - **`saveAccountingData` returns a `SaveResult`** — `{ ok: true } | { ok: false; error }`. A module-level `tauriAvailable` flag distinguishes "Tauri actually failed" (surface as `backupStatus` error banner) from "we're in a browser and Tauri was never available" (silent fallback). Don't go back to the older `void`-returning shape.
@@ -68,7 +70,7 @@ A second `useEffect` registers two listeners:
 - `getCurrentWindow().onCloseRequested` (via dynamic `import("@tauri-apps/api/window")` so the browser build doesn't blow up) — `event.preventDefault()`, run `flushSave()` (drain `pendingSaveRef` then `await inFlightSaveRef`), `window.confirm` on save failure, then `win.close()`. A `closingRef` guards reentry from the second close-requested event that `win.close()` triggers.
 - `beforeunload` — pure browser-mode fallback. Synchronously clears the timer and calls `saveFallbackJson(FALLBACK_STORAGE_KEY, latestDataRef.current)` directly (NOT `saveAccountingData`, because its first `await` schedules the localStorage write into a microtask the tab won't live to run). Tauri webview doesn't fire `beforeunload` on close, so the two paths don't double-write.
 
-If you touch the persist effect, keep `latestDataRef` / `pendingSaveRef` / `inFlightSaveRef` / `storageLoadedRef` / `closingRef` and the `runSave()` helper that wires the invoke promise into `inFlightSaveRef` — they're the contract the close handler relies on.
+If you touch the persist effect, keep `latestDataRef` / `pendingSaveRef` / `inFlightSaveRef` / `storageLoadedRef` / `closingRef` / `persistedSinceLoadRef` and the `runSave()` helper that wires the invoke promise into `inFlightSaveRef` — they're the contract the close handler relies on. `runSave` is an `async` function: it assigns `inFlightSaveRef.current = promise` synchronously *before* its first `await`, so callers that do `void runSave()` and then read the ref always see the in-flight invoke.
 
 The Rust side (`src-tauri/src/lib.rs`) exposes three commands:
 - `load_accounting_store` — reads `~/Desktop/王源专属记账工作台的文件夹/accounting-data.json`. Auto-migrates from legacy `app_data_dir` location on first read.
@@ -105,6 +107,7 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 - `fmtCompact(n)` — abbreviated `1.2M` / `45.6K` / `89` for chart labels and the donut center. Use this anywhere a number could grow large (≥1M) and squeeze its container.
 - `splitMoney(n)` — for big-typography splits like `¥48,290`+`.00`, used by `CountUp`.
 - `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. **Both use local-timezone `getFullYear/Month/Date` parts**, not `toISOString().slice(...)` — going back to UTC silently shifts records created in the early morning (UTC+8) onto the wrong day. `parseExcelDate` also routes through `dateKey` for the same reason. Use these helpers; don't reinline the formatting.
+- `parseKey(key)` — the inverse of `dateKey`. Takes a `YYYY-MM-DD` string and returns a local `Date` (uses `new Date(y, m-1, d)` parts). Use this whenever you need a working `Date` inside a memo keyed on `todayKey` — *never* `new Date(todayKey)`, which parses as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones.
 - `buildMonthSeq(records, anchor)` — takes a `monthKey` string anchor (e.g. `currentMonthKey`), not a `Date`. Produces 6 month-keys ending at `max(anchor, latestRecordMonth)`, so charts include future-dated entries. Both `LedgerPage` and `StatsPage` go through this. Passing a `Date` constructed from `new Date(monthKey + "-01")` was a UTC-parsing trap in earlier versions — keep the string interface.
 - `categoryBreakdown(cats, byCat, type)` — returns `{ items, total }` filtered to the given type, sorted by amount desc, with `total` clamped to `1` to keep `amount/total` divisions safe. Used by both pages' donut and bar charts.
 - `BreakdownBars` component — renders the stats-bar list. Both expense and income breakdowns share it; don't reinline.
@@ -115,7 +118,7 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 
 `LedgerPage` and `StatsPage` cache derived data with `useMemo` keyed on **string keys** (`todayKey`, `currentMonthKey`) rather than the `now: Date` object. `now = new Date()` runs fresh per render, but the heavy memos only invalidate when the date string actually changes — so re-renders from filter clicks or modal toggles don't recompute monthSeq/heatDays/dailyAggregates. If you add a memo that depends on "today", depend on `todayKey`, never on `now`.
 
-Inside those memos, reconstruct a working `Date` from the key with `new Date(y, m-1, d)` (parts) — not `new Date(todayKey)` or `new Date(monthKey + "-01")`. The string form is parsed as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones; the heatmap/`dailyAggregates`/`buildMonthSeq` call sites all use the parts form.
+Inside those memos, reconstruct a working `Date` from the key via `parseKey(todayKey)` — not `new Date(todayKey)` or `new Date(monthKey + "-01")`. The string form is parsed as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones; `dailyAggregates`, `heatDays`, and `buildMonthSeq` all go through `parseKey` (or the `monthKey` string interface).
 
 ### Greeting / trend copy is data-driven
 
@@ -124,6 +127,6 @@ Inside those memos, reconstruct a working `Date` from the key with `new Date(y, 
 ## Conventions
 
 - Chinese UI text, with letter-spacing applied per-character via spaces (e.g. `书 业 账 房`, `保 存 记 录`). Match this when adding new copy.
-- Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`.
+- Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`. The full mono fallback stack (`"JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace`) is centralized on the `--v2-mono` CSS variable — use `font-family: var(--v2-mono);` instead of inlining the stack so the fallback chain stays consistent.
 - Receipt cards (`.v2-receipt`, `.v2-modal-card`) use perforated edges via `radial-gradient` masks (`.v2-receipt-perf` / `.v2-modal-perf`). Keep the perf elements when adding new ledger surfaces.
 - Default categories must not be deletable — the UI hides the delete button via the `DEFAULT_CATEGORY_IDS` Set lookup (don't revert to `DEFAULT_CATEGORIES.some(...)` in render code).

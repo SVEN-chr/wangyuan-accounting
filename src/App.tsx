@@ -158,6 +158,11 @@ const dateKey = (d: Date) =>
 const today = () => dateKey(new Date());
 const monthKey = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+/** Rebuild a local Date from a `YYYY-MM-DD` key — never `new Date(key)` (UTC trap). */
+const parseKey = (key: string): Date => {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
 
 const fmtAmount = (n: number, decimals = 2) =>
   Number(n).toLocaleString("zh-CN", {
@@ -649,17 +654,19 @@ function App() {
   const inFlightSaveRef = useRef<Promise<SaveResult> | null>(null);
   const storageLoadedRef = useRef(false);
   const closingRef = useRef(false);
-
-  useEffect(() => {
-    latestDataRef.current = { records, categories, openingBalance };
-  }, [records, categories, openingBalance]);
+  // Skip the first persist tick after storage loads — load fed setRecords/etc with the
+  // same values we just read off disk, so saving them back is a guaranteed no-op write.
+  const persistedSinceLoadRef = useRef(false);
 
   useEffect(() => {
     storageLoadedRef.current = storageLoaded;
   }, [storageLoaded]);
 
-  function runSave(): Promise<SaveResult> {
-    const promise = saveAccountingData(latestDataRef.current).then((result) => {
+  async function runSave(): Promise<SaveResult> {
+    const promise = saveAccountingData(latestDataRef.current);
+    inFlightSaveRef.current = promise;
+    try {
+      const result = await promise;
       if (!result.ok) {
         setBackupStatus({
           type: "error",
@@ -667,18 +674,20 @@ function App() {
         });
       }
       return result;
-    });
-    const tracked = promise.finally(() => {
-      if (inFlightSaveRef.current === tracked) {
+    } finally {
+      if (inFlightSaveRef.current === promise) {
         inFlightSaveRef.current = null;
       }
-    });
-    inFlightSaveRef.current = tracked;
-    return promise;
+    }
   }
 
   useEffect(() => {
+    latestDataRef.current = { records, categories, openingBalance };
     if (!storageLoaded) return;
+    if (!persistedSinceLoadRef.current) {
+      persistedSinceLoadRef.current = true;
+      return;
+    }
     if (pendingSaveRef.current !== null) {
       window.clearTimeout(pendingSaveRef.current);
     }
@@ -1414,8 +1423,7 @@ function LedgerPage({
   const currentMonthKey = monthKey(now);
 
   const dailyAggregates = useMemo(() => {
-    const [ty, tm, td] = todayKey.split("-").map(Number);
-    const reference = new Date(ty, tm - 1, td);
+    const reference = parseKey(todayKey);
     reference.setDate(reference.getDate() - 6);
     const weekStartKey = dateKey(reference);
     let todayExpense = 0;
@@ -1502,10 +1510,11 @@ function LedgerPage({
   const heatDays = useMemo(() => {
     const days: { date: string; value: number }[] = [];
     let max = 1;
-    const [ty, tm, td] = todayKey.split("-").map(Number);
+    const start = parseKey(todayKey);
+    const startDate = start.getDate();
     for (let i = 41; i >= 0; i--) {
-      const d = new Date(ty, tm - 1, td - i);
-      const key = dateKey(d);
+      start.setDate(startDate - i);
+      const key = dateKey(start);
       const value = stats.byDay[key] || 0;
       if (value > max) max = value;
       days.push({ date: key, value });
