@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  书业账房 · 王源专属记账工作台 — app icon source
+  Receipt Ledger (Variant B) palette, mirroring src/App.css :root vars:
+    v2-paper       #FAF3E2  (背景)
+    v2-paper-2     #F4EAD2
+    v2-ink         #2A1F12
+    v2-ink-mute    #8E795A
+    v2-rule        #C9B690
+    v2-terra       #B5532A  (印戳外圈)
+    v2-terra-deep  #7C3A0E  (字)
+
+  Designed at 1024×1024. Render to PNG with @resvg/resvg-js, then
+  `pnpm tauri icon <png>` generates all sizes + .ico + .icns.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+
+  <!-- 1. Warm paper background (rounded square, iOS / macOS friendly) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="200" ry="200" fill="#FAF3E2"/>
+
+  <!-- 2. Subtle paper grain: faint ledger lines, matches app body background -->
+  <g opacity="0.08" stroke="#a08250" stroke-width="2">
+    <line x1="80"  y1="220" x2="944" y2="220"/>
+    <line x1="80"  y1="320" x2="944" y2="320"/>
+    <line x1="80"  y1="420" x2="944" y2="420"/>
+    <line x1="80"  y1="520" x2="944" y2="520"/>
+    <line x1="80"  y1="620" x2="944" y2="620"/>
+    <line x1="80"  y1="720" x2="944" y2="720"/>
+    <line x1="80"  y1="820" x2="944" y2="820"/>
+  </g>
+
+  <!-- 3. Perforated edge (top + bottom dots), like the receipt cards -->
+  <g fill="#EFE5D2">
+    <circle cx="100"  cy="40"  r="22"/>
+    <circle cx="216"  cy="40"  r="22"/>
+    <circle cx="332"  cy="40"  r="22"/>
+    <circle cx="448"  cy="40"  r="22"/>
+    <circle cx="564"  cy="40"  r="22"/>
+    <circle cx="680"  cy="40"  r="22"/>
+    <circle cx="796"  cy="40"  r="22"/>
+    <circle cx="912"  cy="40"  r="22"/>
+
+    <circle cx="100"  cy="984" r="22"/>
+    <circle cx="216"  cy="984" r="22"/>
+    <circle cx="332"  cy="984" r="22"/>
+    <circle cx="448"  cy="984" r="22"/>
+    <circle cx="564"  cy="984" r="22"/>
+    <circle cx="680"  cy="984" r="22"/>
+    <circle cx="796"  cy="984" r="22"/>
+    <circle cx="912"  cy="984" r="22"/>
+  </g>
+
+  <!-- 4. Top-left mono mark — N° (issue number) -->
+  <text x="110" y="180"
+        font-family="'JetBrains Mono', 'Courier New', monospace"
+        font-size="76"
+        font-weight="700"
+        fill="#8e795a"
+        letter-spacing="8">N°</text>
+
+  <!-- 5. Top-right mono tag — LEDGER -->
+  <text x="914" y="178" text-anchor="end"
+        font-family="'JetBrains Mono', 'Courier New', monospace"
+        font-size="60"
+        font-weight="600"
+        fill="#8e795a"
+        letter-spacing="12">LEDGER</text>
+
+  <!-- 6. Central stamp — slightly rotated, two concentric rings (outer solid,
+        inner dashed) wrapping the CJK character 账. Same anatomy as the
+        receipt rail's circular stamp (.v2-stamp) inside the app. -->
+  <g transform="translate(512 540) rotate(-8)">
+    <!-- Outer solid ring -->
+    <circle cx="0" cy="0" r="368" fill="none" stroke="#B5532A" stroke-width="56"/>
+    <!-- Inner dashed ring -->
+    <circle cx="0" cy="0" r="296" fill="none" stroke="#B5532A" stroke-width="14"
+            stroke-dasharray="36 26" stroke-linecap="round"/>
+
+    <!-- The hero CJK character. Multi-stack font fallback so the renderer
+         can pick whatever CJK font it finds on the host. -->
+    <text x="0" y="22" text-anchor="middle" dominant-baseline="middle"
+          font-family="'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Microsoft YaHei UI', 'Noto Sans SC', 'Source Han Sans SC', 'SimHei', sans-serif"
+          font-weight="900"
+          font-size="440"
+          fill="#7C3A0E">账</text>
+  </g>
+
+  <!-- 7. Bottom mono signature — version + brand minimark -->
+  <text x="512" y="950" text-anchor="middle"
+        font-family="'JetBrains Mono', 'Courier New', monospace"
+        font-size="46"
+        font-weight="600"
+        fill="#5c4a33"
+        letter-spacing="22">¥ · BOOKKEEPING</text>
+</svg>
