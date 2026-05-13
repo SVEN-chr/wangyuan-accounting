@@ -742,17 +742,33 @@ function App() {
         if (cancelled) return;
         const win = mod.getCurrentWindow();
         const off = await win.onCloseRequested(async (event) => {
+          // 第二次 close-requested 来自我们主动 win.close()，直接放行
           if (closingRef.current) return;
           event.preventDefault();
-          const result = await flushSave();
-          if (result && !result.ok) {
-            const proceed = window.confirm(
-              `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`,
-            );
-            if (!proceed) return;
-          }
           closingRef.current = true;
-          await win.close();
+          try {
+            // 3s 超时上限：磁盘繁忙 / invoke 卡死时 X 不要永远点不动
+            const result = await Promise.race<SaveResult | null>([
+              flushSave(),
+              new Promise<null>((resolve) =>
+                window.setTimeout(() => resolve(null), 3000),
+              ),
+            ]);
+            if (result && !result.ok) {
+              const proceed = window.confirm(
+                `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`,
+              );
+              if (!proceed) {
+                closingRef.current = false;
+                return;
+              }
+            }
+          } catch (error) {
+            console.error("[close] flushSave threw", error);
+          }
+          // 不 await：await win.close() 会和这个 close-requested handler 互等
+          // —— Rust 等 JS handler 返回，JS 在 await close 等 Rust 真关窗。
+          void win.close();
         });
         if (cancelled) {
           off();
