@@ -48,6 +48,7 @@ fn load_accounting_store(app: AppHandle) -> Result<String, String> {
         return Ok(String::new());
     };
     atomic_write(&path, payload.as_bytes())?;
+    let _ = fs::remove_file(&legacy_path);
     Ok(payload)
 }
 

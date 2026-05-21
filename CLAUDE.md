@@ -57,10 +57,12 @@ Almost the entire app lives in `src/App.tsx` — top-level `App` component plus 
 
 - **Save is debounced** (300 ms) in the App's persist `useEffect`. Bursts of edits coalesce into one write — preserve this when refactoring the persist effect; don't move the work inline.
 - **First post-load tick is skipped** via `persistedSinceLoadRef`. The load handler calls `setRecords`/`setCategories`/`setOpeningBalance` with the values just read off disk; without the guard, the very next render would queue a debounced save that writes back the identical bytes (one wasted `atomic_write` + fsync per launch). Don't remove this skip; the close-handler still works because `flushSave()` only awaits an actually-pending invoke.
+- **`loadFallback` is only consulted on cold paths.** `loadAccountingData`'s Tauri-success branch checks whether all three top-level fields (`records`/`categories`/`openingBalance`) parsed cleanly; if so it returns without touching localStorage. The fallback (3 localStorage reads + 3 JSON.parse) only fires on empty payload, malformed shape, or invoke failure — don't move it back above the validity check.
 - **`latestDataRef` is updated on the persist effect's first line**, before any `storageLoaded` gate or skip-tick early return. The close handler and `beforeunload` listener depend on it always reflecting the most recent state, even before the first real save fires.
 - **Save is atomic on the Rust side**: `save_accounting_store` writes to `accounting-data.json.tmp`, calls `sync_all` on the temp file, then `fs::rename`s over the target. The user's ledger is irreplaceable; don't drop the fsync or replace this with a plain `fs::write`.
 - **Save only writes the consolidated localStorage key** (`accounting.file-store-fallback`). The three legacy split keys (`accounting.records` etc.) are still *read* by `loadFallback` for one-shot migration of old browser data, but never written.
 - **`saveAccountingData` returns a `SaveResult`** — `{ ok: true } | { ok: false; error }`. A module-level `tauriAvailable` flag distinguishes "Tauri actually failed" (surface as `backupStatus` error banner) from "we're in a browser and Tauri was never available" (silent fallback). Don't go back to the older `void`-returning shape.
+- **Save-failure visibility is global.** `runSave` writes errors into `backupStatus`, and the App renders a fixed-position `.v2-save-toast` whenever `backupStatus.type === "error"` *and* `page !== "backup"` (the Backup page already shows the same status inline). Don't move the error UI back inside `BackupPage` only — users editing on Ledger/Stats/Categories would silently lose Tauri writes.
 
 **Close-window flush — don't regress this.** Closing the desktop window must not drop the last edit, even when the 300 ms debounce hasn't fired or its invoke is still in flight. The persist effect tracks two things via refs:
 - `pendingSaveRef` — the debounce `setTimeout` handle.
@@ -73,7 +75,7 @@ A second `useEffect` registers two listeners:
 If you touch the persist effect, keep `latestDataRef` / `pendingSaveRef` / `inFlightSaveRef` / `storageLoadedRef` / `closingRef` / `persistedSinceLoadRef` and the `runSave()` helper that wires the invoke promise into `inFlightSaveRef` — they're the contract the close handler relies on. `runSave` is an `async` function: it assigns `inFlightSaveRef.current = promise` synchronously *before* its first `await`, so callers that do `void runSave()` and then read the ref always see the in-flight invoke.
 
 The Rust side (`src-tauri/src/lib.rs`) exposes three commands:
-- `load_accounting_store` — reads `~/Desktop/王源专属记账工作台的文件夹/accounting-data.json`. Auto-migrates from legacy `app_data_dir` location on first read.
+- `load_accounting_store` — reads `~/Desktop/王源专属记账工作台的文件夹/accounting-data.json`. Auto-migrates from legacy `app_data_dir` location on first read, and best-effort `fs::remove_file`s the legacy source after a successful `atomic_write` so subsequent empty-store launches don't keep re-migrating.
 - `save_accounting_store` — atomic write via tmp + fsync + rename (see `atomic_write` helper, which takes `&Path` so callers can pass either `&Path` or `&PathBuf` through Deref).
 - `save_excel_backup` — drops a sanitized `.xlsx` into the same workspace folder.
 
@@ -100,6 +102,8 @@ The App-level `useMemo` builds `catsById: Map<string, Category>` once and expose
 
 Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. Import overwrites everything after a `window.confirm`. Headers are language-tolerant (see `readExcelCell` candidate keys: `分类名称|分类|name`, `日期|date`, etc.) so users can hand-edit the file. Categories without a `形状`/`颜色` cell get auto-assigned from the `SHAPES` and `PALETTE` arrays.
 
+**`xlsx` is lazy-loaded.** The module (~430 KB) is not in the initial chunk — `exportBackup` and `importFromFile` first call `await loadXLSX()` (a memoized `import("xlsx")`) before touching `XLSX.utils.*`. `parseExcelDate` takes the loaded module as a parameter rather than importing at the top. Don't reintroduce `import * as XLSX from "xlsx"` at the top of `App.tsx` — it pulls SheetJS into every cold launch even though only the Backup page needs it.
+
 ### Charts and number formatting
 
 - `fmtAmount(n, decimals=2)` — bare number `12,345.67`, no currency prefix. Use inside receipt rows / entry rows where the `¥` is rendered separately or the column is implicitly a money column.
@@ -107,11 +111,11 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 - `fmtCompact(n)` — abbreviated `1.2M` / `45.6K` / `89` for chart labels and the donut center. Use this anywhere a number could grow large (≥1M) and squeeze its container.
 - `splitMoney(n)` — for big-typography splits like `¥48,290`+`.00`, used by `CountUp`.
 - `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. **Both use local-timezone `getFullYear/Month/Date` parts**, not `toISOString().slice(...)` — going back to UTC silently shifts records created in the early morning (UTC+8) onto the wrong day. `parseExcelDate` also routes through `dateKey` for the same reason. Use these helpers; don't reinline the formatting.
-- `parseKey(key)` — the inverse of `dateKey`. Takes a `YYYY-MM-DD` string and returns a local `Date` (uses `new Date(y, m-1, d)` parts). Use this whenever you need a working `Date` inside a memo keyed on `todayKey` — *never* `new Date(todayKey)`, which parses as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones.
+- `parseKey(key)` — the inverse of `dateKey`. Takes a `YYYY-MM-DD` string and returns a local `Date` (uses `new Date(y, m-1, d)` parts). Use this whenever you need a working `Date` inside a memo keyed on `todayKey` — *never* `new Date(todayKey)`, which parses as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones. The same rule applies anywhere a `YYYY-MM-DD` string is converted to a `Date` for weekday/day-of-month work — e.g. `weekdayCN(string)` routes through `parseKey`, and the StatsPage day-of-week histogram uses `parseKey(r.date).getDay()` instead of `new Date(r.date).getDay()`.
 - `buildMonthSeq(records, anchor)` — takes a `monthKey` string anchor (e.g. `currentMonthKey`), not a `Date`. Produces 6 month-keys ending at `max(anchor, latestRecordMonth)`, so charts include future-dated entries. Both `LedgerPage` and `StatsPage` go through this. Passing a `Date` constructed from `new Date(monthKey + "-01")` was a UTC-parsing trap in earlier versions — keep the string interface.
 - `categoryBreakdown(cats, byCat, type)` — returns `{ items, total }` filtered to the given type, sorted by amount desc, with `total` clamped to `1` to keep `amount/total` divisions safe. Used by both pages' donut and bar charts.
 - `BreakdownBars` component — renders the stats-bar list. Both expense and income breakdowns share it; don't reinline.
-- `heatColor(intensity)` / `netColor(net)` — color-threshold lookups for the heatmap and the net-line chart dots. Don't re-implement the cascading `if`-chain inline.
+- `heatColor(intensity)` / `netColor(net)` — color-threshold lookups for the heatmap and the net-line chart dots. Don't re-implement the cascading `if`-chain inline. The heatmap *legend* renders by mapping over `HEAT_LEGEND` (derived from `HEAT_BASE` + reversed `HEAT_COLORS`), not by re-spelling the four hex codes — so tuning a threshold updates both the cells and the swatch row.
 - The stats trend chart uses an asymmetric Y mapping: positive net goes up 120 logical units (into the bar area); negative net goes down 70 units (below the y=200 baseline). Don't accidentally clip negative values off the SVG when changing the chart. The `yNet(net)` helper is hoisted in `StatsPage` — keep it that way (it was previously an IIFE and got nested 3 deep).
 
 ### Memo discipline
@@ -127,6 +131,6 @@ Inside those memos, reconstruct a working `Date` from the key via `parseKey(toda
 ## Conventions
 
 - Chinese UI text, with letter-spacing applied per-character via spaces (e.g. `书 业 账 房`, `保 存 记 录`). Match this when adding new copy.
-- Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`. The full mono fallback stack (`"JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace`) is centralized on the `--v2-mono` CSS variable — use `font-family: var(--v2-mono);` instead of inlining the stack so the fallback chain stays consistent.
+- Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`. The full mono fallback stack (`"JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace`) is centralized on the `--v2-mono` CSS variable — use `font-family: var(--v2-mono);` instead of inlining the stack so the fallback chain stays consistent. Inside SVG, prefer `style={{ fontFamily: "var(--v2-mono)" }}` on `<text>` over the `fontFamily="JetBrains Mono"` presentation attribute, because the attribute form can't resolve CSS custom properties and silently drops the fallback chain.
 - Receipt cards (`.v2-receipt`, `.v2-modal-card`) use perforated edges via `radial-gradient` masks (`.v2-receipt-perf` / `.v2-modal-perf`). Keep the perf elements when adding new ledger surfaces.
 - Default categories must not be deletable — the UI hides the delete button via the `DEFAULT_CATEGORY_IDS` Set lookup (don't revert to `DEFAULT_CATEGORIES.some(...)` in render code).

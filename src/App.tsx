@@ -6,8 +6,16 @@ import {
   type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import * as XLSX from "xlsx";
 import "./App.css";
+
+type XLSXModule = typeof import("xlsx");
+let xlsxModulePromise: Promise<XLSXModule> | null = null;
+function loadXLSX(): Promise<XLSXModule> {
+  if (!xlsxModulePromise) {
+    xlsxModulePromise = import("xlsx");
+  }
+  return xlsxModulePromise;
+}
 
 /* =================================================================
    Types & constants
@@ -192,6 +200,7 @@ const HEAT_COLORS: Array<[number, string]> = [
   [0.05, "#E8B97A"],
 ];
 const HEAT_BASE = "#F5E6CC";
+const HEAT_LEGEND = [HEAT_BASE, ...[...HEAT_COLORS].reverse().map(([, c]) => c)];
 const heatColor = (intensity: number): string => {
   for (const [threshold, color] of HEAT_COLORS) {
     if (intensity > threshold) return color;
@@ -230,7 +239,7 @@ function timeGreeting(d: Date) {
 }
 
 function weekdayCN(d: Date | string) {
-  const date = typeof d === "string" ? new Date(d) : d;
+  const date = typeof d === "string" ? parseKey(d) : d;
   return DOW_LABEL[date.getDay()];
 }
 
@@ -284,17 +293,31 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
     tauriAvailable = true;
     if (!raw) return loadFallback();
     const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
+    const recordsOk = Array.isArray(parsed.records);
+    const categoriesOk = Array.isArray(parsed.categories);
+    const balanceOk =
+      typeof parsed.openingBalance === "number" &&
+      Number.isFinite(parsed.openingBalance);
+    if (recordsOk && categoriesOk && balanceOk) {
+      return {
+        records: parsed.records as RecordItem[],
+        categories: (parsed.categories as Partial<Category>[]).map((c) =>
+          migrateCategory(c),
+        ),
+        openingBalance: parsed.openingBalance as number,
+      };
+    }
     const fb = loadFallback();
     return {
-      records: Array.isArray(parsed.records) ? parsed.records : fb.records,
-      categories: Array.isArray(parsed.categories)
-        ? parsed.categories.map((c) => migrateCategory(c))
+      records: recordsOk ? (parsed.records as RecordItem[]) : fb.records,
+      categories: categoriesOk
+        ? (parsed.categories as Partial<Category>[]).map((c) =>
+            migrateCategory(c),
+          )
         : fb.categories,
-      openingBalance:
-        typeof parsed.openingBalance === "number" &&
-        Number.isFinite(parsed.openingBalance)
-          ? parsed.openingBalance
-          : fb.openingBalance,
+      openingBalance: balanceOk
+        ? (parsed.openingBalance as number)
+        : fb.openingBalance,
     };
   } catch {
     tauriAvailable = false;
@@ -332,8 +355,8 @@ function parseCategoryType(value: unknown): CategoryType | null {
 }
 
 function parseShape(value: unknown): CatShape | null {
-  const t = String(value ?? "").trim().toLowerCase() as CatShape;
-  return SHAPES.includes(t) ? t : null;
+  const t = String(value ?? "").trim().toLowerCase();
+  return (SHAPES as readonly string[]).includes(t) ? (t as CatShape) : null;
 }
 
 function readExcelCell(row: ExcelRow, keys: string[]): unknown {
@@ -359,17 +382,15 @@ function parseExcelRecordId(value: unknown, fallback: number) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function parseExcelDate(value: unknown) {
+function parseExcelDate(value: unknown, xlsx: XLSXModule) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return dateKey(value);
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    const parsed = (XLSX.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
+    const parsed = (xlsx.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
       .parse_date_code?.(value);
     if (parsed) {
-      const month = String(parsed.m).padStart(2, "0");
-      const day = String(parsed.d).padStart(2, "0");
-      return `${parsed.y}-${month}-${day}`;
+      return dateKey(new Date(parsed.y, parsed.m - 1, parsed.d));
     }
   }
   const text = String(value ?? "").trim();
@@ -377,7 +398,7 @@ function parseExcelDate(value: unknown) {
   const normalized = text.replace(EXCEL_DATE_SEPARATOR_RE, "-");
   const match = normalized.match(EXCEL_DATE_MATCH_RE);
   if (!match) return "";
-  return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+  return dateKey(new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
 }
 
 function makeCategoryId(name: string, type: CategoryType, used: Set<string>) {
@@ -861,16 +882,19 @@ function App() {
     if (!form.catId || !form.amount || !Number.isFinite(amount) || amount <= 0)
       return;
 
+    const note = form.note.trim();
+    const noteField = note ? { note } : {};
+
     if (editId !== null) {
       setRecords((items) =>
         items.map((r) =>
           r.id === editId
             ? {
-                ...r,
+                id: r.id,
                 catId: form.catId,
                 amount,
                 date: form.date,
-                note: form.note.trim(),
+                ...noteField,
               }
             : r,
         ),
@@ -883,7 +907,7 @@ function App() {
           catId: form.catId,
           amount,
           date: form.date,
-          note: form.note.trim(),
+          ...noteField,
         },
       ]);
     }
@@ -913,6 +937,7 @@ function App() {
 
   /* ---- backup ---- */
   async function exportBackup() {
+    const XLSX = await loadXLSX();
     const recordRows = sortedRecords.map((record) => {
       const c = getCat(record.catId);
       return {
@@ -997,6 +1022,7 @@ function App() {
 
   async function importFromFile(file: File) {
     try {
+      const XLSX = await loadXLSX();
       const data = await file.arrayBuffer();
       const wb = XLSX.read(data, { cellDates: true });
       const recordSheet =
@@ -1060,7 +1086,7 @@ function App() {
         const categoryName = String(
           readExcelCell(row, ["分类", "分类名称", "category"]),
         ).trim();
-        const date = parseExcelDate(readExcelCell(row, ["日期", "date"]));
+        const date = parseExcelDate(readExcelCell(row, ["日期", "date"]), XLSX);
         const amount = Math.abs(rawAmount);
         if (
           !categoryName ||
@@ -1145,6 +1171,18 @@ function App() {
         onPage={setPage}
         onAdd={() => openAddModal("expense")}
       />
+
+      {backupStatus.type === "error" && page !== "backup" && (
+        <div
+          role="alert"
+          className="v2-save-toast"
+          onClick={() => setBackupStatus({ type: "idle", message: "" })}
+        >
+          <span className="v2-save-toast-stamp">!</span>
+          <span className="v2-save-toast-msg">{backupStatus.message}</span>
+          <span className="mono v2-save-toast-hint">点击关闭</span>
+        </div>
+      )}
 
       {page === "ledger" && (
         <LedgerPage
@@ -1783,22 +1821,13 @@ function LedgerPage({
               </div>
               <div className="v2-heat-scale mono">
                 少
-                <span
-                  className="v2-heat-cell"
-                  style={{ background: "#F5E6CC" }}
-                />
-                <span
-                  className="v2-heat-cell"
-                  style={{ background: "#E8B97A" }}
-                />
-                <span
-                  className="v2-heat-cell"
-                  style={{ background: "#C6701D" }}
-                />
-                <span
-                  className="v2-heat-cell"
-                  style={{ background: "#7C3A0E" }}
-                />
+                {HEAT_LEGEND.map((c) => (
+                  <span
+                    key={c}
+                    className="v2-heat-cell"
+                    style={{ background: c }}
+                  />
+                ))}
                 多
               </div>
             </div>
@@ -2025,7 +2054,7 @@ function StatsPage({
     const buckets = [0, 0, 0, 0, 0, 0, 0];
     for (const r of records) {
       if (catsById.get(r.catId)?.type === "expense") {
-        buckets[new Date(r.date).getDay()] += r.amount;
+        buckets[parseKey(r.date).getDay()] += r.amount;
       }
     }
     let max = 1;
@@ -2156,7 +2185,7 @@ function StatsPage({
                           fontSize="10"
                           fill="#5C7C2C"
                           textAnchor="middle"
-                          fontFamily="JetBrains Mono"
+                          style={{ fontFamily: "var(--v2-mono)" }}
                         >
                           {fmtCompact(s.income)}
                         </text>
@@ -2168,7 +2197,7 @@ function StatsPage({
                           fontSize="10"
                           fill="#B5532A"
                           textAnchor="middle"
-                          fontFamily="JetBrains Mono"
+                          style={{ fontFamily: "var(--v2-mono)" }}
                         >
                           {fmtCompact(s.expense)}
                         </text>
@@ -2221,7 +2250,7 @@ function StatsPage({
                       fontSize="11"
                       fill="#5C4A33"
                       textAnchor="middle"
-                      fontFamily="JetBrains Mono"
+                      style={{ fontFamily: "var(--v2-mono)" }}
                     >
                       {s.m.slice(5)}月
                     </text>
@@ -2727,9 +2756,10 @@ function NewRecordModal({
     });
   }
 
-  const [recordNo] = useState(
-    () => `${form.date}-${String(Math.floor(Math.random() * 900) + 100)}`,
+  const [recordNoSuffix] = useState(() =>
+    String(Math.floor(Math.random() * 900) + 100),
   );
+  const recordNo = `${form.date}-${recordNoSuffix}`;
 
   return (
     <div className="v2-modal-stage" role="dialog" aria-modal="true">

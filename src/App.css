@@ -1392,6 +1392,44 @@ button {
   display: none;
 }
 
+.v2-save-toast {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--v2-terra);
+  background: var(--v2-paper);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  color: var(--v2-terra-deep);
+  cursor: pointer;
+}
+.v2-save-toast-stamp {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--v2-terra);
+  color: var(--v2-terra-deep);
+  font-weight: 700;
+  font-family: var(--v2-mono);
+}
+.v2-save-toast-msg {
+  font-size: 13px;
+  line-height: 1.4;
+}
+.v2-save-toast-hint {
+  font-size: 10px;
+  color: var(--v2-ink-mute);
+  letter-spacing: 0.08em;
+  margin-left: auto;
+}
+
 /* =================================================================
    New record modal
 ================================================================= */
