@@ -85,6 +85,8 @@ const OPENING_BALANCE_STORAGE_KEY = "accounting.opening-balance";
 const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
 const FIRST_RUN_KEY = "accounting.first-run-seeded";
 const DEFAULT_OPENING_BALANCE = 0;
+const ENTRIES_PER_PAGE = 12;
+const HEAT_WINDOW_DAYS = 42;
 const EXCEL_RECORD_SHEET = "收支记录";
 const EXCEL_CATEGORY_SHEET = "分类";
 const EXCEL_SUMMARY_SHEET = "汇总";
@@ -170,6 +172,12 @@ const monthKey = (d: Date) =>
 const parseKey = (key: string): Date => {
   const [y, m, d] = key.split("-").map(Number);
   return new Date(y, m - 1, d);
+};
+/** Shift a `YYYY-MM-DD` key by `delta` days, staying in local time. */
+const addDaysKey = (key: string, delta: number): string => {
+  const d = parseKey(key);
+  d.setDate(d.getDate() + delta);
+  return dateKey(d);
 };
 
 const fmtAmount = (n: number, decimals = 2) =>
@@ -1476,6 +1484,40 @@ function LedgerPage({
   const todayKey = dateKey(now);
   const currentMonthKey = monthKey(now);
 
+  // Heatmap window end (last visible day), clicked day, and entries page.
+  const [heatEnd, setHeatEnd] = useState(todayKey);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [entryPage, setEntryPage] = useState(1);
+
+  // Navigation bounds — let future-dated records (and earliest history) be reachable.
+  const dateBounds = useMemo(() => {
+    let min = todayKey;
+    let max = todayKey;
+    for (const r of records) {
+      if (r.date < min) min = r.date;
+      if (r.date > max) max = r.date;
+    }
+    return { min, max };
+  }, [records, todayKey]);
+
+  // Reset to first page whenever the visible set changes.
+  useEffect(() => {
+    setEntryPage(1);
+  }, [entryFilter, selectedDay]);
+
+  // Keep the heat window inside the available data range when records shrink
+  // (e.g. deleting the future-dated day you had navigated to). No-op when in
+  // range, so it doesn't cause an extra render on every records change.
+  useEffect(() => {
+    setHeatEnd((end) =>
+      end > dateBounds.max
+        ? dateBounds.max
+        : end < dateBounds.min
+          ? dateBounds.min
+          : end,
+    );
+  }, [dateBounds]);
+
   const dailyAggregates = useMemo(() => {
     const reference = parseKey(todayKey);
     reference.setDate(reference.getDate() - 6);
@@ -1564,17 +1606,48 @@ function LedgerPage({
   const heatDays = useMemo(() => {
     const days: { date: string; value: number }[] = [];
     let max = 1;
-    const start = parseKey(todayKey);
-    const startDate = start.getDate();
-    for (let i = 41; i >= 0; i--) {
-      start.setDate(startDate - i);
-      const key = dateKey(start);
+    for (let i = HEAT_WINDOW_DAYS - 1; i >= 0; i--) {
+      const key = addDaysKey(heatEnd, -i);
       const value = stats.byDay[key] || 0;
       if (value > max) max = value;
       days.push({ date: key, value });
     }
     return { days, max };
-  }, [stats.byDay, todayKey]);
+  }, [stats.byDay, heatEnd]);
+
+  // Derived entries list: single-day view when a heat cell is selected, else the
+  // filter-driven list. Paginated for both. `filtered` is already date+id sorted.
+  const dayList = useMemo(
+    () =>
+      selectedDay
+        ? records
+            .filter((r) => r.date === selectedDay)
+            .sort((a, b) => b.id - a.id)
+        : null,
+    [records, selectedDay],
+  );
+  const displayList = selectedDay ? (dayList as RecordItem[]) : filtered;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(displayList.length / ENTRIES_PER_PAGE),
+  );
+  const safePage = Math.min(entryPage, totalPages);
+  const pageStart = (safePage - 1) * ENTRIES_PER_PAGE;
+  const pageItems = displayList.slice(pageStart, pageStart + ENTRIES_PER_PAGE);
+
+  const heatNextDisabled = heatEnd >= dateBounds.max;
+  const heatPrevDisabled = heatEnd <= dateBounds.min;
+  const goHeatPrev = () =>
+    setHeatEnd((end) => {
+      const next = addDaysKey(end, -HEAT_WINDOW_DAYS);
+      const floor = dateBounds.min;
+      return next < floor ? floor : next;
+    });
+  const goHeatNext = () =>
+    setHeatEnd((end) => {
+      const next = addDaysKey(end, HEAT_WINDOW_DAYS);
+      return next > dateBounds.max ? dateBounds.max : next;
+    });
 
   const monthData = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
   const monthBalance = monthData.income - monthData.expense;
@@ -1817,7 +1890,9 @@ function LedgerPage({
             <div className="v2-card-head">
               <div>
                 <h3>每 日 支 出 强 度</h3>
-                <div className="mono">42 DAYS · DEEPER = MORE SPENT</div>
+                <div className="mono">
+                  {heatDays.days[0].date} – {heatDays.days[HEAT_WINDOW_DAYS - 1].date} · 点 击 查 看 当 日
+                </div>
               </div>
               <div className="v2-heat-scale mono">
                 少
@@ -1831,16 +1906,70 @@ function LedgerPage({
                 多
               </div>
             </div>
+            <div className="v2-heat-nav">
+              <button
+                type="button"
+                onClick={goHeatPrev}
+                disabled={heatPrevDisabled}
+                aria-label="上一段"
+              >
+                ←
+              </button>
+              <button
+                type="button"
+                onClick={goHeatNext}
+                disabled={heatNextDisabled}
+                aria-label="下一段"
+              >
+                →
+              </button>
+              <button
+                type="button"
+                onClick={() => setHeatEnd(todayKey)}
+                disabled={heatEnd === todayKey}
+              >
+                回到今天
+              </button>
+              <input
+                type="date"
+                className="v2-heat-date mono"
+                value={heatEnd}
+                min={dateBounds.min}
+                max={dateBounds.max}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (!v) return;
+                  const clamped =
+                    v > dateBounds.max
+                      ? dateBounds.max
+                      : v < dateBounds.min
+                        ? dateBounds.min
+                        : v;
+                  setHeatEnd(clamped);
+                  setSelectedDay(v);
+                }}
+              />
+            </div>
             <div className="v2-heat-grid">
               {heatDays.days.map((d) => {
                 const intensity = d.value / heatDays.max;
                 const bg = heatColor(intensity);
+                const isSel = d.date === selectedDay;
                 return (
                   <div
                     key={d.date}
-                    className="v2-heat-cell-big"
+                    className={`v2-heat-cell-big${isSel ? " selected" : ""}`}
                     style={{ background: bg } as CSSProperties}
                     title={`${d.date} · ${fmtMoney(d.value, 0)}`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedDay(d.date)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedDay(d.date);
+                      }
+                    }}
                   >
                     <span className="mono">{d.date.slice(8)}</span>
                   </div>
@@ -1853,42 +1982,54 @@ function LedgerPage({
           <section className="v2-entries">
             <div className="v2-card-head">
               <div>
-                <h3>近 期 账 目</h3>
+                <h3>{selectedDay ? "当 日 账 目" : "近 期 账 目"}</h3>
                 <div className="mono">
-                  RECENT ENTRIES · {filtered.length}
+                  {selectedDay
+                    ? `${selectedDay} · 周${weekdayCN(selectedDay)} · ${displayList.length} 笔`
+                    : `RECENT ENTRIES · ${displayList.length}`}
                 </div>
               </div>
-              <div className="v2-filters">
-                {(
-                  [
-                    ["all", "全部"],
-                    ["expense", "支出"],
-                    ["income", "收入"],
-                    ["month", "本月"],
-                  ] as const
-                ).map(([k, l]) => (
-                  <button
-                    key={k}
-                    className={entryFilter === k ? "active" : ""}
-                    onClick={() => setEntryFilter(k)}
-                    type="button"
-                  >
-                    {l}
+              {selectedDay ? (
+                <div className="v2-filters">
+                  <button type="button" onClick={() => setSelectedDay(null)}>
+                    × 返回全部
                   </button>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="v2-filters">
+                  {(
+                    [
+                      ["all", "全部"],
+                      ["expense", "支出"],
+                      ["income", "收入"],
+                      ["month", "本月"],
+                    ] as const
+                  ).map(([k, l]) => (
+                    <button
+                      key={k}
+                      className={entryFilter === k ? "active" : ""}
+                      onClick={() => setEntryFilter(k)}
+                      type="button"
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="v2-entries-list">
-              {filtered.length === 0 && (
-                <div className="v2-empty">暂无记录</div>
+              {displayList.length === 0 && (
+                <div className="v2-empty">
+                  {selectedDay ? "这一天没有记录" : "暂无记录"}
+                </div>
               )}
-              {filtered.slice(0, 12).map((r, i) => {
+              {pageItems.map((r, i) => {
                 const cat = getCat(r.catId);
                 const isIn = cat.type === "income";
                 return (
                   <div key={r.id} className="v2-entry">
                     <div className="v2-entry-no mono">
-                      {String(i + 1).padStart(3, "0")}
+                      {String(pageStart + i + 1).padStart(3, "0")}
                     </div>
                     <div className="v2-entry-date">
                       <div className="d">{r.date.slice(8)}</div>
@@ -1932,6 +2073,27 @@ function LedgerPage({
                 );
               })}
             </div>
+            {totalPages > 1 && (
+              <div className="v2-pager">
+                <button
+                  type="button"
+                  onClick={() => setEntryPage(Math.max(1, safePage - 1))}
+                  disabled={safePage <= 1}
+                >
+                  上一页
+                </button>
+                <span className="mono v2-pager-info">
+                  第 {safePage} / {totalPages} 页 · 共 {displayList.length} 笔
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setEntryPage(Math.min(totalPages, safePage + 1))}
+                  disabled={safePage >= totalPages}
+                >
+                  下一页
+                </button>
+              </div>
+            )}
           </section>
         </main>
       </div>

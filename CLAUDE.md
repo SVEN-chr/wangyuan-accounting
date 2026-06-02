@@ -112,6 +112,7 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 - `splitMoney(n)` — for big-typography splits like `¥48,290`+`.00`, used by `CountUp`.
 - `dateKey(d)` / `monthKey(d)` / `today()` — canonical YYYY-MM-DD / YYYY-MM string formatters. **Both use local-timezone `getFullYear/Month/Date` parts**, not `toISOString().slice(...)` — going back to UTC silently shifts records created in the early morning (UTC+8) onto the wrong day. `parseExcelDate` also routes through `dateKey` for the same reason. Use these helpers; don't reinline the formatting.
 - `parseKey(key)` — the inverse of `dateKey`. Takes a `YYYY-MM-DD` string and returns a local `Date` (uses `new Date(y, m-1, d)` parts). Use this whenever you need a working `Date` inside a memo keyed on `todayKey` — *never* `new Date(todayKey)`, which parses as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones. The same rule applies anywhere a `YYYY-MM-DD` string is converted to a `Date` for weekday/day-of-month work — e.g. `weekdayCN(string)` routes through `parseKey`, and the StatsPage day-of-week histogram uses `parseKey(r.date).getDay()` instead of `new Date(r.date).getDay()`.
+- `addDaysKey(key, delta)` — shifts a `YYYY-MM-DD` key by `delta` days (can be negative) and returns a key, all in local time (`parseKey` → `setDate` → `dateKey`, so month/year rollover and the UTC trap are handled). Use it for day-window math — the heatmap walks `heatEnd` back through `HEAT_WINDOW_DAYS` with it. Don't hand-roll `new Date(...).getTime() + i*86400000`, which drifts across DST.
 - `buildMonthSeq(records, anchor)` — takes a `monthKey` string anchor (e.g. `currentMonthKey`), not a `Date`. Produces 6 month-keys ending at `max(anchor, latestRecordMonth)`, so charts include future-dated entries. Both `LedgerPage` and `StatsPage` go through this. Passing a `Date` constructed from `new Date(monthKey + "-01")` was a UTC-parsing trap in earlier versions — keep the string interface.
 - `categoryBreakdown(cats, byCat, type)` — returns `{ items, total }` filtered to the given type, sorted by amount desc, with `total` clamped to `1` to keep `amount/total` divisions safe. Used by both pages' donut and bar charts.
 - `BreakdownBars` component — renders the stats-bar list. Both expense and income breakdowns share it; don't reinline.
@@ -122,11 +123,21 @@ Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. 
 
 `LedgerPage` and `StatsPage` cache derived data with `useMemo` keyed on **string keys** (`todayKey`, `currentMonthKey`) rather than the `now: Date` object. `now = new Date()` runs fresh per render, but the heavy memos only invalidate when the date string actually changes — so re-renders from filter clicks or modal toggles don't recompute monthSeq/heatDays/dailyAggregates. If you add a memo that depends on "today", depend on `todayKey`, never on `now`.
 
-Inside those memos, reconstruct a working `Date` from the key via `parseKey(todayKey)` — not `new Date(todayKey)` or `new Date(monthKey + "-01")`. The string form is parsed as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones; `dailyAggregates`, `heatDays`, and `buildMonthSeq` all go through `parseKey` (or the `monthKey` string interface).
+Inside those memos, reconstruct a working `Date` from the key via `parseKey(todayKey)` — not `new Date(todayKey)` or `new Date(monthKey + "-01")`. The string form is parsed as UTC midnight and disagrees with `dateKey`/`monthKey` in non-UTC timezones; `dailyAggregates` and `buildMonthSeq` go through `parseKey` (or the `monthKey` string interface), and `heatDays` walks from `heatEnd` via `addDaysKey` (also `parseKey`-based). Note `heatDays` is keyed on `heatEnd` (a navigable window-end key), *not* `todayKey` — see the Ledger-page interactions section.
 
 ### Greeting / trend copy is data-driven
 
 `GreetingStrip`'s `note` prop is the trend message. `LedgerPage` computes it from real `stats.byMonth` values comparing the current calendar month vs prior 5 months — never hardcode strings like "本月节余创近半年新高" again.
+
+### Ledger page: heat-window navigation, day view, entry pagination
+
+`LedgerPage` holds three pieces of *non-persisted* view state that drive the "每日支出强度" heatmap and the "近期账目" list:
+
+- **`heatEnd`** (a `YYYY-MM-DD` key, init `todayKey`) — the last day of the `HEAT_WINDOW_DAYS` (42) heat grid. `heatDays` walks back from `heatEnd` with `addDaysKey`, so the window is navigable: ←/→ step a whole window, 回到今天 resets to `todayKey`, and the `<input type="date">` jumps to any day *and* selects it. Every setter clamps into `[dateBounds.min, dateBounds.max]`.
+- **`dateBounds`** — `{ min, max }` over `records`, seeded with `todayKey` on both ends so the window can reach the earliest history **and future-dated entries** (records dated after today). The ←/→ buttons disable at these bounds. A `useEffect` re-clamps `heatEnd` back into range whenever `dateBounds` shrinks (e.g. you navigate to a future record, then delete it); it returns the same value when already in range, so it does **not** cause an extra render on every `records` change.
+- **`selectedDay`** — clicking a heat cell (or picking a date) sets it; the entries section then switches to a single-day view (`dayList` = records on that day, header "当 日 账 目", `× 返回全部` to clear). `null` = the normal `entryFilter`-driven list.
+
+Entries are **paginated, not capped** (the old `filtered.slice(0, 12)` is gone). `displayList` (= `dayList` when a day is selected, else the `filtered` prop) is sliced into `ENTRIES_PER_PAGE` (12) pages. **Derive every read from `safePage = min(entryPage, totalPages)`, never raw `entryPage`** — the `第 X/Y 页` label, entry numbering (`pageStart + i + 1`, continuous across pages), the disabled checks, *and the prev/next `onClick`* all use `safePage`. The buttons must call `setEntryPage(safePage ± 1)`, **not** a functional `(p) => p ± 1`: when a deletion shrinks `totalPages` below a now-stale `entryPage`, the functional form dead-clicks (it decrements a number `safePage` already masks). `entryPage` resets to 1 via a `useEffect` on `[entryFilter, selectedDay]`.
 
 ## Conventions
 
