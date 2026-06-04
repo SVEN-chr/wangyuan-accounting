@@ -89,7 +89,11 @@ jobs:
           $sig = (Get-Content $sigFile.FullName -Raw).Trim() -replace "`r`n","`n"
           $assetName = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name|endswith("-setup.exe")) | .name'
           if (-not $assetName) { throw "uploaded -setup.exe asset not found on release $tag" }
-          $url = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/$assetName"
+          # 安装包下载 URL 走 GitHub 加速镜像，这样没有代理的国内用户也能下载更新。
+          # latest.json 里每平台只能写一个 url（无 fallback）——若该镜像失效，改这里的
+          # $mirror 重新发版即可。清单本身的拉取在 tauri.conf.json 里配了多个镜像端点兜底。
+          $mirror = "https://ghfast.top"
+          $url = "$mirror/https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/$assetName"
           $obj = [ordered]@{
             version   = $version
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")

@@ -25,6 +25,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
+        "https://ghfast.top/https://github.com/SVEN-chr/wangyuan-accounting/releases/latest/download/latest.json",
+        "https://gh-proxy.com/https://github.com/SVEN-chr/wangyuan-accounting/releases/latest/download/latest.json",
+        "https://gh.llkk.cc/https://github.com/SVEN-chr/wangyuan-accounting/releases/latest/download/latest.json",
         "https://github.com/SVEN-chr/wangyuan-accounting/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDMUYzNTEzQzA4MUNGQzcKUldUSHo0SEFFelVmZkE2SnkxQXkvUk45V2NCYVdkZ29nTkUzOENpUjdBdm9yYTJSUVhsSlRJb3MK",
