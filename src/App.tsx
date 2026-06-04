@@ -119,7 +119,7 @@ const FIRST_RUN_KEY = "accounting.first-run-seeded";
 const DEFAULT_OPENING_BALANCE = 0;
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
-const APP_VERSION = "0.1.6";
+const APP_VERSION = "0.1.7";
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;

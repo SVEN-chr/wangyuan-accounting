@@ -1,6 +1,6 @@
 [package]
 name = "wangyuan-accounting"
-version = "0.1.6"
+version = "0.1.7"
 description = "王源专属记账工作台"
 authors = ["you"]
 edition = "2021"
