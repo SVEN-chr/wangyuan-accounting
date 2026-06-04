@@ -119,7 +119,7 @@ const FIRST_RUN_KEY = "accounting.first-run-seeded";
 const DEFAULT_OPENING_BALANCE = 0;
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
-const APP_VERSION = "0.1.5";
+const APP_VERSION = "0.1.6";
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -876,15 +876,29 @@ function App() {
 
   /* ---- auto-update (Tauri-only; silently no-ops in browser/dev) ---- */
   const pendingUpdateRef = useRef<PendingUpdate | null>(null);
-  const updateBusyRef = useRef(false);
+  const checkInFlightRef = useRef(false);
+  const installingRef = useRef(false);
+  // 若静默检查进行中用户点了「检查更新」，把这次结果按手动展示（显示 已最新/错误）
+  const manualPendingRef = useRef(false);
 
   async function checkForUpdate(manual: boolean) {
-    if (updateBusyRef.current) return;
-    updateBusyRef.current = true;
+    if (installingRef.current) return; // 正在下载安装，忽略检查
+    if (checkInFlightRef.current) {
+      // 已有检查在进行（通常是启动时的静默检查）：手动点击立即给反馈，
+      // 并把这次进行中的检查结果升级为「手动」展示，避免点了没反应。
+      if (manual) {
+        manualPendingRef.current = true;
+        setUpdateState({ phase: "checking" });
+      }
+      return;
+    }
+    checkInFlightRef.current = true;
     if (manual) setUpdateState({ phase: "checking" });
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
-      const update = (await check()) as PendingUpdate | null;
+      // 20s 超时：网络不通时尽快失败，别把按钮一直卡在「检查中」/锁住后续点击
+      const update = (await check({ timeout: 20000 })) as PendingUpdate | null;
+      const asManual = manual || manualPendingRef.current;
       if (update) {
         pendingUpdateRef.current = update;
         setUpdateState({
@@ -894,12 +908,13 @@ function App() {
         });
       } else {
         pendingUpdateRef.current = null;
-        setUpdateState(manual ? { phase: "uptodate" } : { phase: "idle" });
+        setUpdateState(asManual ? { phase: "uptodate" } : { phase: "idle" });
       }
     } catch (error) {
       pendingUpdateRef.current = null;
-      // 浏览器 / 无 Tauri 环境：静默；只有用户主动点「检查更新」才提示
-      if (manual) {
+      const asManual = manual || manualPendingRef.current;
+      // 浏览器 / 无 Tauri 环境：静默；只有用户主动检查才提示
+      if (asManual) {
         setUpdateState({
           phase: "error",
           error:
@@ -911,14 +926,15 @@ function App() {
         setUpdateState({ phase: "idle" });
       }
     } finally {
-      updateBusyRef.current = false;
+      checkInFlightRef.current = false;
+      manualPendingRef.current = false;
     }
   }
 
   async function runUpdate() {
     const update = pendingUpdateRef.current;
-    if (!update || updateBusyRef.current) return;
-    updateBusyRef.current = true;
+    if (!update || installingRef.current) return;
+    installingRef.current = true;
     try {
       // 安装会退出并重启 App —— 先把最后一笔编辑落盘
       await flushSave();
@@ -952,8 +968,8 @@ function App() {
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (error) {
-      // 失败时复位 busy，让用户可重试
-      updateBusyRef.current = false;
+      // 失败时复位，让用户可重试
+      installingRef.current = false;
       setUpdateState({
         phase: "error",
         version: update.version,
