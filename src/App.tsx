@@ -70,6 +70,38 @@ type BackupStatus = {
   message: string;
 };
 
+type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "uptodate"
+  | "error";
+
+type UpdateState = {
+  phase: UpdatePhase;
+  version?: string;
+  notes?: string;
+  downloaded?: number;
+  total?: number;
+  error?: string;
+};
+
+// Minimal structural shapes for @tauri-apps/plugin-updater (dynamically imported,
+// so we don't pull the plugin types into the browser/dev build).
+type UpdateDownloadEvent =
+  | { event: "Started"; data: { contentLength?: number } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished" };
+
+type PendingUpdate = {
+  version: string;
+  body?: string;
+  downloadAndInstall: (
+    onEvent?: (event: UpdateDownloadEvent) => void,
+  ) => Promise<void>;
+};
+
 type Stats = {
   income: number;
   expense: number;
@@ -85,6 +117,27 @@ const OPENING_BALANCE_STORAGE_KEY = "accounting.opening-balance";
 const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
 const FIRST_RUN_KEY = "accounting.first-run-seeded";
 const DEFAULT_OPENING_BALANCE = 0;
+// Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
+// Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
+const APP_VERSION = "0.1.5";
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return String(error);
+}
+
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = n;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
 const ENTRIES_PER_PAGE = 12;
 const HEAT_WINDOW_DAYS = 42;
 const EXCEL_RECORD_SHEET = "收支记录";
@@ -638,6 +691,8 @@ function App() {
     type: "idle",
     message: "",
   });
+  const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
+  const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   /* ---- load on mount ---- */
@@ -710,6 +765,26 @@ function App() {
     }
   }
 
+  // Flush any debounced/in-flight save and await its completion. Shared by the
+  // close-requested handler and the updater (we persist before install+relaunch).
+  async function flushSave(): Promise<SaveResult | null> {
+    if (!storageLoadedRef.current) return null;
+    if (pendingSaveRef.current !== null) {
+      window.clearTimeout(pendingSaveRef.current);
+      pendingSaveRef.current = null;
+      void runSave();
+    }
+    const pending = inFlightSaveRef.current;
+    if (pending) {
+      try {
+        return await pending;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   useEffect(() => {
     latestDataRef.current = { records, categories, openingBalance };
     if (!storageLoaded) return;
@@ -734,24 +809,6 @@ function App() {
   }, [records, categories, openingBalance, storageLoaded]);
 
   useEffect(() => {
-    async function flushSave(): Promise<SaveResult | null> {
-      if (!storageLoadedRef.current) return null;
-      if (pendingSaveRef.current !== null) {
-        window.clearTimeout(pendingSaveRef.current);
-        pendingSaveRef.current = null;
-        void runSave();
-      }
-      const pending = inFlightSaveRef.current;
-      if (pending) {
-        try {
-          return await pending;
-        } catch {
-          return null;
-        }
-      }
-      return null;
-    }
-
     const onBeforeUnload = () => {
       if (pendingSaveRef.current !== null) {
         window.clearTimeout(pendingSaveRef.current);
@@ -814,6 +871,112 @@ function App() {
       window.removeEventListener("beforeunload", onBeforeUnload);
       unlisten?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ---- auto-update (Tauri-only; silently no-ops in browser/dev) ---- */
+  const pendingUpdateRef = useRef<PendingUpdate | null>(null);
+  const updateBusyRef = useRef(false);
+
+  async function checkForUpdate(manual: boolean) {
+    if (updateBusyRef.current) return;
+    updateBusyRef.current = true;
+    if (manual) setUpdateState({ phase: "checking" });
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = (await check()) as PendingUpdate | null;
+      if (update) {
+        pendingUpdateRef.current = update;
+        setUpdateState({
+          phase: "available",
+          version: update.version,
+          notes: update.body || undefined,
+        });
+      } else {
+        pendingUpdateRef.current = null;
+        setUpdateState(manual ? { phase: "uptodate" } : { phase: "idle" });
+      }
+    } catch (error) {
+      pendingUpdateRef.current = null;
+      // 浏览器 / 无 Tauri 环境：静默；只有用户主动点「检查更新」才提示
+      if (manual) {
+        setUpdateState({
+          phase: "error",
+          error:
+            tauriAvailable !== true
+              ? "仅桌面端支持检查更新"
+              : describeError(error),
+        });
+      } else {
+        setUpdateState({ phase: "idle" });
+      }
+    } finally {
+      updateBusyRef.current = false;
+    }
+  }
+
+  async function runUpdate() {
+    const update = pendingUpdateRef.current;
+    if (!update || updateBusyRef.current) return;
+    updateBusyRef.current = true;
+    try {
+      // 安装会退出并重启 App —— 先把最后一笔编辑落盘
+      await flushSave();
+      let total = 0;
+      let downloaded = 0;
+      setUpdateState({
+        phase: "downloading",
+        version: update.version,
+        downloaded: 0,
+        total: 0,
+      });
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            total = event.data.contentLength ?? 0;
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            break;
+          case "Finished":
+            downloaded = total;
+            break;
+        }
+        setUpdateState({
+          phase: "downloading",
+          version: update.version,
+          downloaded,
+          total,
+        });
+      });
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (error) {
+      // 失败时复位 busy，让用户可重试
+      updateBusyRef.current = false;
+      setUpdateState({
+        phase: "error",
+        version: update.version,
+        error: describeError(error),
+      });
+    }
+  }
+
+  function dismissUpdate() {
+    setUpdateState({ phase: "idle" });
+  }
+
+  /* ---- on mount: resolve real app version + silent update check ---- */
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        setAppVersion(await getVersion());
+      } catch {
+        /* 浏览器模式：保留 APP_VERSION 常量 */
+      }
+    })();
+    void checkForUpdate(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1192,6 +1355,103 @@ function App() {
         </div>
       )}
 
+      {page !== "backup" &&
+        (updateState.phase === "available" ||
+          updateState.phase === "downloading" ||
+          updateState.phase === "error") && (
+        <div className="v2-update-banner" role="status">
+          <div className="v2-update-perf" aria-hidden="true" />
+          {updateState.phase === "available" && (
+            <>
+              <div className="v2-update-body">
+                <div className="mono v2-update-tag">UPDATE · 新 版 本</div>
+                <div className="v2-update-title">
+                  发 现 新 版 本 v{updateState.version}
+                </div>
+                {updateState.notes && (
+                  <div className="v2-update-notes">{updateState.notes}</div>
+                )}
+              </div>
+              <div className="v2-update-actions">
+                <button
+                  type="button"
+                  className="v2-btn-primary v2-update-btn"
+                  onClick={() => void runUpdate()}
+                >
+                  立 即 更 新
+                </button>
+                <button
+                  type="button"
+                  className="v2-update-btn-ghost"
+                  onClick={dismissUpdate}
+                >
+                  稍 后
+                </button>
+              </div>
+            </>
+          )}
+          {updateState.phase === "downloading" && (
+            <div className="v2-update-body">
+              <div className="mono v2-update-tag">DOWNLOADING · 下 载 中</div>
+              <div className="v2-update-title">
+                正 在 下 载 v{updateState.version}
+              </div>
+              <div className="v2-update-bar">
+                <div
+                  className="v2-update-bar-fill"
+                  style={{
+                    width:
+                      updateState.total && updateState.total > 0
+                        ? `${Math.round(
+                            ((updateState.downloaded ?? 0) /
+                              updateState.total) *
+                              100,
+                          )}%`
+                        : "100%",
+                  }}
+                />
+              </div>
+              <div className="mono v2-update-progress">
+                {updateState.total && updateState.total > 0
+                  ? `${fmtBytes(updateState.downloaded ?? 0)} / ${fmtBytes(
+                      updateState.total,
+                    )}`
+                  : "准 备 安 装…"}
+              </div>
+            </div>
+          )}
+          {updateState.phase === "error" && (
+            <>
+              <div className="v2-update-body">
+                <div className="mono v2-update-tag">ERROR · 更 新 出 错</div>
+                <div className="v2-update-title">更 新 失 败</div>
+                <div className="v2-update-notes">{updateState.error}</div>
+              </div>
+              <div className="v2-update-actions">
+                <button
+                  type="button"
+                  className="v2-btn-primary v2-update-btn"
+                  onClick={() =>
+                    void (pendingUpdateRef.current
+                      ? runUpdate()
+                      : checkForUpdate(true))
+                  }
+                >
+                  重 试
+                </button>
+                <button
+                  type="button"
+                  className="v2-update-btn-ghost"
+                  onClick={dismissUpdate}
+                >
+                  关 闭
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {page === "ledger" && (
         <LedgerPage
           records={records}
@@ -1234,6 +1494,10 @@ function App() {
           onExport={exportBackup}
           onImport={openImportPicker}
           onImportFile={importFromFile}
+          appVersion={appVersion}
+          updateState={updateState}
+          onCheckUpdate={() => void checkForUpdate(true)}
+          onRunUpdate={() => void runUpdate()}
         />
       )}
 
@@ -2767,6 +3031,10 @@ function BackupPage({
   onExport,
   onImport,
   onImportFile,
+  appVersion,
+  updateState,
+  onCheckUpdate,
+  onRunUpdate,
 }: {
   records: RecordItem[];
   categories: Category[];
@@ -2774,6 +3042,10 @@ function BackupPage({
   onExport: () => void;
   onImport: () => void;
   onImportFile: (file: File) => void;
+  appVersion: string;
+  updateState: UpdateState;
+  onCheckUpdate: () => void;
+  onRunUpdate: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const filename = `wangyuan-${today()}.xlsx`;
@@ -2873,6 +3145,59 @@ function BackupPage({
               </div>
             </div>
           </div>
+        </section>
+
+        <section className="v2-backup-card about">
+          <div className="v2-backup-tag mono">ABOUT · 关 于 与 更 新</div>
+          <h3 className="v2-backup-h">版 本 与 更 新</h3>
+          <p className="v2-backup-desc">
+            应用启动时会自动检查新版本。你也可以随时手动检查；发现新版本可一键下载并安装，无需再去下载安装包。
+          </p>
+          <div className="v2-about-row">
+            <div>
+              <div className="mono">当前版本</div>
+              <div className="v2-backup-num">v{appVersion}</div>
+            </div>
+            <button
+              type="button"
+              className="v2-btn-primary v2-backup-btn"
+              onClick={onCheckUpdate}
+              disabled={
+                updateState.phase === "checking" ||
+                updateState.phase === "downloading"
+              }
+            >
+              {updateState.phase === "checking" ? "检 查 中…" : "检 查 更 新"}
+            </button>
+          </div>
+          {updateState.phase === "uptodate" && (
+            <div className="v2-backup-status success">已 是 最 新 版 本</div>
+          )}
+          {updateState.phase === "available" && (
+            <div className="v2-about-avail">
+              <span>发 现 新 版 本 v{updateState.version}</span>
+              <button
+                type="button"
+                className="v2-btn-primary"
+                onClick={onRunUpdate}
+              >
+                立 即 更 新
+              </button>
+            </div>
+          )}
+          {updateState.phase === "downloading" && (
+            <div className="v2-backup-status">
+              正 在 下 载…{" "}
+              {updateState.total && updateState.total > 0
+                ? `${Math.round(
+                    ((updateState.downloaded ?? 0) / updateState.total) * 100,
+                  )}%`
+                : ""}
+            </div>
+          )}
+          {updateState.phase === "error" && (
+            <div className="v2-backup-status error">{updateState.error}</div>
+          )}
         </section>
       </div>
     </>

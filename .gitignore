@@ -24,6 +24,11 @@ src-tauri/icons/ios/
 # Claude Code
 .claude/
 
+# Tauri updater signing keys — NEVER commit the private key
+*.key
+*.key.pub
+wangyuan-updater.key*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

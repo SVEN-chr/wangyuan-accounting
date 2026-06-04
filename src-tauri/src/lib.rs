@@ -92,6 +92,8 @@ fn save_excel_backup(app: AppHandle, filename: String, bytes: Vec<u8>) -> Result
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             load_accounting_store,
             save_accounting_store,
