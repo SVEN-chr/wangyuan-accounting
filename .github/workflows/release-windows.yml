@@ -72,6 +72,33 @@ jobs:
           prerelease: false
           args: --bundles nsis
 
+      # tauri-action 在 productName 含 CJK 时无法生成更新清单（"Signature not found
+      # for the updater JSON"），且 GitHub 会把上传资产名里的中文清掉。这里自行用磁盘上
+      # 已签名的 .sig + 实际上传的资产名拼出 latest.json，供 updater 的 releases/latest
+      # /download/latest.json 端点拉取。仅在创建了 Release（tag 非空）时执行。
+      - name: Generate & upload updater latest.json
+        if: steps.tag.outputs.value != ''
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.tag.outputs.value }}"
+          $version = $tag.TrimStart('v')
+          $sigFile = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe.sig | Select-Object -First 1
+          if (-not $sigFile) { throw "updater signature (*-setup.exe.sig) not found — 确认 createUpdaterArtifacts + 签名密钥已配置" }
+          $sig = (Get-Content $sigFile.FullName -Raw).Trim() -replace "`r`n","`n"
+          $assetName = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name|endswith("-setup.exe")) | .name'
+          if (-not $assetName) { throw "uploaded -setup.exe asset not found on release $tag" }
+          $url = "https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/$assetName"
+          $obj = [ordered]@{
+            version   = $version
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{ "windows-x86_64" = [ordered]@{ signature = $sig; url = $url } }
+          }
+          $obj | ConvertTo-Json -Depth 6 | Set-Content -Path latest.json -Encoding utf8 -NoNewline
+          Write-Host "----- latest.json -----"; Get-Content latest.json -Raw
+          gh release upload $tag latest.json --repo $env:GITHUB_REPOSITORY --clobber
+
       - name: Upload installer as workflow artifact
         if: steps.tag.outputs.value == ''
         uses: actions/upload-artifact@v4
