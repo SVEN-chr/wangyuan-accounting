@@ -87,7 +87,9 @@ jobs:
           $sigFile = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe.sig | Select-Object -First 1
           if (-not $sigFile) { throw "updater signature (*-setup.exe.sig) not found — 确认 createUpdaterArtifacts + 签名密钥已配置" }
           $sig = (Get-Content $sigFile.FullName -Raw).Trim() -replace "`r`n","`n"
-          $assetName = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name|endswith("-setup.exe")) | .name'
+          # Select-Object -First 1：万一 release 上有多个 *-setup.exe 资产，避免 $assetName 变成数组
+          # 进而把 url 拼成空格连接的非法串。
+          $assetName = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name|endswith("-setup.exe")) | .name' | Select-Object -First 1
           if (-not $assetName) { throw "uploaded -setup.exe asset not found on release $tag" }
           # 安装包下载 URL 走 GitHub 加速镜像，这样没有代理的国内用户也能下载更新。
           # latest.json 里每平台只能写一个 url（无 fallback）——若该镜像失效，改这里的
@@ -99,7 +101,8 @@ jobs:
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = [ordered]@{ "windows-x86_64" = [ordered]@{ signature = $sig; url = $url } }
           }
-          $obj | ConvertTo-Json -Depth 6 | Set-Content -Path latest.json -Encoding utf8 -NoNewline
+          # utf8NoBOM：显式无 BOM —— 带 BOM 的 latest.json 会让 updater 的 serde_json 解析失败。
+          $obj | ConvertTo-Json -Depth 6 | Set-Content -Path latest.json -Encoding utf8NoBOM -NoNewline
           Write-Host "----- latest.json -----"; Get-Content latest.json -Raw
           gh release upload $tag latest.json --repo $env:GITHUB_REPOSITORY --clobber
 

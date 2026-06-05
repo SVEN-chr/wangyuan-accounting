@@ -138,6 +138,12 @@ function fmtBytes(n: number): string {
   }
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
+
+// 下载进度百分比标签；total 未知（≤0）时返回调用方给的占位串。
+function updatePercentLabel(s: UpdateState, fallback: string): string {
+  if (!s.total || s.total <= 0) return fallback;
+  return `${Math.round(((s.downloaded ?? 0) / s.total) * 100)}%`;
+}
 const ENTRIES_PER_PAGE = 12;
 const HEAT_WINDOW_DAYS = 42;
 const EXCEL_RECORD_SHEET = "收支记录";
@@ -233,6 +239,10 @@ const addDaysKey = (key: string, delta: number): string => {
   return dateKey(d);
 };
 
+/** Clamp a `YYYY-MM-DD` key into `[min, max]` (字典序即时间序). */
+const clampKey = (key: string, min: string, max: string): string =>
+  key < min ? min : key > max ? max : key;
+
 const fmtAmount = (n: number, decimals = 2) =>
   Number(n).toLocaleString("zh-CN", {
     minimumFractionDigits: decimals,
@@ -242,15 +252,19 @@ const fmtAmount = (n: number, decimals = 2) =>
 const fmtMoney = (n: number, decimals = 2) => "¥" + fmtAmount(n, decimals);
 
 const splitMoney = (n: number): [string, string] => {
-  const parts = Number(n).toFixed(2).split(".");
-  const intPart = Number(parts[0]).toLocaleString("zh-CN");
+  // 用绝对值取整数/小数位，再补回符号 —— 否则 -0.50 会被 Number("-0") 抹成 "0"，丢失负号。
+  const sign = n < 0 ? "-" : "";
+  const parts = Math.abs(n).toFixed(2).split(".");
+  const intPart = sign + Number(parts[0]).toLocaleString("zh-CN");
   return [intPart, "." + parts[1]];
 };
 
 const fmtCompact = (n: number): string => {
   const abs = Math.abs(n);
   const sign = n < 0 ? "−" : "";
-  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
+  // 阈值取 999_950 而非 1_000_000：≥999_950 时 (abs/1000).toFixed(1) 会进位成
+  // "1000.0"，应升格成 M 形式（"1.0M"），否则会渲染出更长的 "1000.0K"。
+  if (abs >= 999_950) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
   if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
   return `${sign}${abs.toFixed(0)}`;
 };
@@ -706,6 +720,10 @@ function App() {
           setRecords(SAMPLE_RECORDS);
           setCategories(DEFAULT_CATEGORIES);
           setOpeningBalance(data.openingBalance);
+          // 种子数据与磁盘（空）不一致，必须落盘。预先置位持久化跳过标记，
+          // 让 persist effect 的首个 tick 真正保存，而不是当成「和磁盘相同」跳过 ——
+          // 否则首启后未编辑就关窗会丢掉种子，且 FIRST_RUN_KEY 已置位不会再播种。
+          persistedSinceLoadRef.current = true;
           try {
             window.localStorage.setItem(FIRST_RUN_KEY, "1");
           } catch {
@@ -1087,16 +1105,22 @@ function App() {
         ),
       );
     } else {
-      setRecords((items) => [
-        ...items,
-        {
-          id: Date.now(),
-          catId: form.catId,
-          amount,
-          date: form.date,
-          ...noteField,
-        },
-      ]);
+      setRecords((items) => {
+        // 唯一 id：同一毫秒内连加两笔会撞 Date.now()，撞了就 +1 兜底。
+        const used = new Set(items.map((r) => r.id));
+        let id = Date.now();
+        while (used.has(id)) id += 1;
+        return [
+          ...items,
+          {
+            id,
+            catId: form.catId,
+            amount,
+            date: form.date,
+            ...noteField,
+          },
+        ];
+      });
     }
     closeModal();
   }
@@ -1110,10 +1134,16 @@ function App() {
   function addCategory(c: Omit<Category, "id">) {
     const trimmed = c.name.trim();
     if (!trimmed) return;
-    setCategories((items) => [
-      ...items,
-      { ...c, name: trimmed, id: `custom-${Date.now()}` },
-    ]);
+    setCategories((items) => {
+      // 同名同类型已存在则忽略：导出/导入按 `type:name` 归并，重复会在往返时丢类别。
+      if (items.some((x) => x.type === c.type && x.name === trimmed)) return items;
+      // 唯一 id：纯 Date.now() 在同一毫秒内连加会撞 id，撞了就追加序号兜底。
+      const used = new Set(items.map((x) => x.id));
+      let id = `custom-${Date.now()}`;
+      let n = 1;
+      while (used.has(id)) id = `custom-${Date.now()}-${n++}`;
+      return [...items, { ...c, name: trimmed, id }];
+    });
   }
 
   function deleteCategory(id: string) {
@@ -1264,6 +1294,10 @@ function App() {
         defval: "",
       });
       let skipped = 0;
+      // 去重记录 id：手改的表里可能有重复「记录ID」，撞了就分配一个唯一兜底值，
+      // 否则两条记录共用 id 会让编辑/删除同时命中多条。
+      const usedRecordIds = new Set<number>();
+      let recordIdSeq = Date.now() + recordRows.length;
       const importedRecords = recordRows.reduce<RecordItem[]>((items, row, idx) => {
         const rawAmount = parseExcelAmount(readExcelCell(row, ["金额", "amount"]));
         const typeFromCell = parseCategoryType(
@@ -1297,11 +1331,14 @@ function App() {
           importedCats.push(cat);
           catByKey.set(key, cat);
         }
+        let id = parseExcelRecordId(
+          readExcelCell(row, ["记录ID", "id"]),
+          Date.now() + idx,
+        );
+        while (usedRecordIds.has(id)) id = ++recordIdSeq;
+        usedRecordIds.add(id);
         items.push({
-          id: parseExcelRecordId(
-            readExcelCell(row, ["记录ID", "id"]),
-            Date.now() + idx,
-          ),
+          id,
           catId: cat.id,
           amount,
           date,
@@ -1415,16 +1452,7 @@ function App() {
               <div className="v2-update-bar">
                 <div
                   className="v2-update-bar-fill"
-                  style={{
-                    width:
-                      updateState.total && updateState.total > 0
-                        ? `${Math.round(
-                            ((updateState.downloaded ?? 0) /
-                              updateState.total) *
-                              100,
-                          )}%`
-                        : "100%",
-                  }}
+                  style={{ width: updatePercentLabel(updateState, "100%") }}
                 />
               </div>
               <div className="mono v2-update-progress">
@@ -1634,6 +1662,12 @@ function GreetingStrip({
     month: "long",
     day: "numeric",
   });
+  const lastDayOfMonth = new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0,
+  ).getDate();
+  const daysToMonthEnd = Math.max(0, lastDayOfMonth - date.getDate());
   return (
     <div className="v2-greet">
       <div className="v2-greet-l">
@@ -1645,16 +1679,7 @@ function GreetingStrip({
           <span className="v2-greet-name">王 源</span>
         </div>
         <div className="v2-greet-sub">
-          今日已记 {recordedToday} 笔 · 距月末{" "}
-          {(() => {
-            const last = new Date(
-              date.getFullYear(),
-              date.getMonth() + 1,
-              0,
-            ).getDate();
-            return Math.max(0, last - date.getDate());
-          })()}{" "}
-          日 · {note}
+          今日已记 {recordedToday} 笔 · 距月末 {daysToMonthEnd} 日 · {note}
         </div>
       </div>
       <div className="v2-greet-r">
@@ -1688,8 +1713,10 @@ function OpeningBalanceRow({
   const [draft, setDraft] = useState(String(value));
 
   function commit() {
-    const n = Number(draft.replace(/[^\d.-]/g, ""));
-    if (Number.isFinite(n)) onChange(n);
+    const cleaned = draft.replace(/[^\d.-]/g, "");
+    const n = Number(cleaned);
+    // 空串经 Number("") 会变成 0，会把真实期初余额静默清零 —— 空输入视为「不修改」。
+    if (cleaned !== "" && Number.isFinite(n)) onChange(n);
     setEditing(false);
   }
 
@@ -1789,13 +1816,7 @@ function LedgerPage({
   // (e.g. deleting the future-dated day you had navigated to). No-op when in
   // range, so it doesn't cause an extra render on every records change.
   useEffect(() => {
-    setHeatEnd((end) =>
-      end > dateBounds.max
-        ? dateBounds.max
-        : end < dateBounds.min
-          ? dateBounds.min
-          : end,
-    );
+    setHeatEnd((end) => clampKey(end, dateBounds.min, dateBounds.max));
   }, [dateBounds]);
 
   const dailyAggregates = useMemo(() => {
@@ -1815,7 +1836,7 @@ function LedgerPage({
         recordedToday += 1;
         if (c.type === "expense") todayExpense += r.amount;
       }
-      if (r.date >= weekStartKey) {
+      if (r.date >= weekStartKey && r.date <= todayKey) {
         weekNet += c.type === "income" ? r.amount : -r.amount;
       }
     }
@@ -1836,8 +1857,12 @@ function LedgerPage({
       if (v.income > maxVal) maxVal = v.income;
       if (v.expense > maxVal) maxVal = v.expense;
     }
-    const cur = stats.byMonth[monthSeq[5]] ?? { income: 0, expense: 0 };
-    const prev = stats.byMonth[monthSeq[4]] ?? { income: 0, expense: 0 };
+    // 当月/环比锚定真实日历月（currentMonthKey），不要用 monthSeq[5] —— 后者是
+    // max(当前月, 最新记录月)，存在未来日期的记录时会指向未来月，与收据栏的当月数据打架。
+    const [cy, cm] = currentMonthKey.split("-").map(Number);
+    const prevMonthKey = monthKey(new Date(cy, cm - 2, 1));
+    const cur = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
+    const prev = stats.byMonth[prevMonthKey] ?? { income: 0, expense: 0 };
     const curN = cur.income - cur.expense;
     const prevN = prev.income - prev.expense;
     const hasPrev = prev.income > 0 || prev.expense > 0;
@@ -1849,7 +1874,7 @@ function LedgerPage({
           ? ((curN - prevN) / Math.abs(prevN)) * 100
           : null,
     };
-  }, [stats.byMonth, monthSeq]);
+  }, [stats.byMonth, monthSeq, currentMonthKey]);
 
   const trendNote = useMemo(() => {
     const cm = stats.byMonth[currentMonthKey];
@@ -1918,20 +1943,17 @@ function LedgerPage({
   const heatNextDisabled = heatEnd >= dateBounds.max;
   const heatPrevDisabled = heatEnd <= dateBounds.min;
   const goHeatPrev = () =>
-    setHeatEnd((end) => {
-      const next = addDaysKey(end, -HEAT_WINDOW_DAYS);
-      const floor = dateBounds.min;
-      return next < floor ? floor : next;
-    });
+    setHeatEnd((end) =>
+      clampKey(addDaysKey(end, -HEAT_WINDOW_DAYS), dateBounds.min, dateBounds.max),
+    );
   const goHeatNext = () =>
-    setHeatEnd((end) => {
-      const next = addDaysKey(end, HEAT_WINDOW_DAYS);
-      return next > dateBounds.max ? dateBounds.max : next;
-    });
+    setHeatEnd((end) =>
+      clampKey(addDaysKey(end, HEAT_WINDOW_DAYS), dateBounds.min, dateBounds.max),
+    );
 
   const monthData = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
   const monthBalance = monthData.income - monthData.expense;
-  const stampDate = `${now.getFullYear()} / ${String(now.getMonth() + 1).padStart(2, "0")} / ${String(now.getDate()).padStart(2, "0")}`;
+  const stampDate = dateKey(now).replace(/-/g, " / ");
   const stampTime = now.toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
@@ -2219,13 +2241,7 @@ function LedgerPage({
                 onChange={(e) => {
                   const v = e.target.value;
                   if (!v) return;
-                  const clamped =
-                    v > dateBounds.max
-                      ? dateBounds.max
-                      : v < dateBounds.min
-                        ? dateBounds.min
-                        : v;
-                  setHeatEnd(clamped);
+                  setHeatEnd(clampKey(v, dateBounds.min, dateBounds.max));
                   setSelectedDay(v);
                 }}
               />
@@ -2518,7 +2534,7 @@ function StatsPage({
           <div className="v2-greet-time mono">STATS · 统 计 报 告</div>
           <div className="v2-greet-hi" style={{ fontSize: 36 }}>
             财 务 体 检 ·
-            <span className="v2-greet-name"> {monthSeq[5].slice(5)} 月</span>
+            <span className="v2-greet-name"> {currentMonthKey.slice(5)} 月</span>
           </div>
           <div className="v2-greet-sub">六个月趋势 · 分类构成 · 周内分布</div>
         </div>
@@ -3204,11 +3220,7 @@ function BackupPage({
           {updateState.phase === "downloading" && (
             <div className="v2-backup-status">
               正 在 下 载…{" "}
-              {updateState.total && updateState.total > 0
-                ? `${Math.round(
-                    ((updateState.downloaded ?? 0) / updateState.total) * 100,
-                  )}%`
-                : ""}
+              {updatePercentLabel(updateState, "")}
             </div>
           )}
           {updateState.phase === "error" && (
@@ -3242,7 +3254,9 @@ function NewRecordModal({
 
   function setType(t: CategoryType) {
     const first = categories.find((c) => c.type === t);
-    setForm((f) => ({ ...f, type: t, catId: first?.id ?? f.catId }));
+    // 目标类型一个分类都没有（如导入了只含单一类型的分类表）时清空 catId，
+    // 让保存按钮失效，避免把记录存到与所选 tab 相反类型的旧分类上。
+    setForm((f) => ({ ...f, type: t, catId: first?.id ?? "" }));
   }
 
   function pad(k: string) {

@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tauri::{AppHandle, Manager};
@@ -53,13 +54,34 @@ fn load_accounting_store(app: AppHandle) -> Result<String, String> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut file = fs::File::create(&tmp).map_err(|error| error.to_string())?;
-        file.write_all(bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "atomic_write: target has no file name".to_string())?;
+    // 唯一临时名（进程号 + 进程内自增序号），避免两次并发写入共用同一个 .tmp 而互相截断：
+    // debounce 落盘与关闭时 flush、或不同命令的写入可能在不同线程上重叠。临时文件与目标同目录，
+    // 保证 rename 在同一卷上是原子替换。
+    let tmp = path.with_file_name(format!(
+        "{file_name}.tmp.{}.{}",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let write_result = (|| -> io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error.to_string());
     }
-    fs::rename(&tmp, path).map_err(|error| error.to_string())
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -84,7 +106,8 @@ fn save_excel_backup(app: AppHandle, filename: String, bytes: Vec<u8>) -> Result
     };
     let path = dir.join(filename);
 
-    fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    // 用户的备份导出同样不可丢：走原子写（tmp + fsync + rename），避免写一半崩溃把上一份好备份毁掉。
+    atomic_write(&path, &bytes)?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -98,8 +121,13 @@ fn apply_system_proxy_to_env() {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
+    // 用户已显式设置任一代理环境变量时就不插手——下面会同时写 HTTP_PROXY 与
+    // HTTPS_PROXY，所以这里也要把 HTTP(_)PROXY 纳入判断，否则会把用户单独设的
+    // HTTP_PROXY 覆盖掉。
     let already_set = std::env::var_os("HTTPS_PROXY").is_some()
         || std::env::var_os("https_proxy").is_some()
+        || std::env::var_os("HTTP_PROXY").is_some()
+        || std::env::var_os("http_proxy").is_some()
         || std::env::var_os("ALL_PROXY").is_some();
     if already_set {
         return;
