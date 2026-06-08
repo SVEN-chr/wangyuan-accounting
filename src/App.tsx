@@ -116,6 +116,10 @@ const CATEGORIES_STORAGE_KEY = "accounting.categories";
 const OPENING_BALANCE_STORAGE_KEY = "accounting.opening-balance";
 const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
 const FIRST_RUN_KEY = "accounting.first-run-seeded";
+// Set when a real Tauri save fails (newest edits live only in the localStorage
+// fallback); read on next launch to recover from the fallback instead of the
+// stale on-disk copy. Cleared on the first successful save.
+const PENDING_SAVE_KEY = "accounting.pending-save";
 const DEFAULT_OPENING_BALANCE = 0;
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
@@ -335,6 +339,23 @@ function saveFallbackJson<T>(key: string, value: T) {
   }
 }
 
+function hasPendingSave(): boolean {
+  try {
+    return window.localStorage.getItem(PENDING_SAVE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setPendingSave(pending: boolean) {
+  try {
+    if (pending) window.localStorage.setItem(PENDING_SAVE_KEY, "1");
+    else window.localStorage.removeItem(PENDING_SAVE_KEY);
+  } catch {
+    /* swallow — restricted webview */
+  }
+}
+
 function migrateCategory(c: Partial<Category>, fallback?: Category): Category {
   const def = fallback ?? DEFAULT_CATEGORIES[0];
   return {
@@ -374,6 +395,13 @@ async function loadAccountingData(): Promise<PersistedAccountingData> {
       typeof parsed.openingBalance === "number" &&
       Number.isFinite(parsed.openingBalance);
     if (recordsOk && categoriesOk && balanceOk) {
+      // A prior save failed: the newest edits live only in the localStorage
+      // fallback, while disk still holds the older good copy. Prefer the
+      // fallback — the mount handler arms persist so it gets re-written to disk,
+      // which clears the pending flag on success. (This is the one place the
+      // fallback is consulted past the validity gate; gated on the flag so the
+      // normal disk-is-truth path is untouched.)
+      if (hasPendingSave()) return loadFallback();
       return {
         records: parsed.records as RecordItem[],
         categories: (parsed.categories as Partial<Category>[]).map((c) =>
@@ -408,10 +436,14 @@ async function saveAccountingData(
   try {
     await invoke("save_accounting_store", { payload: JSON.stringify(data) });
     tauriAvailable = true;
+    setPendingSave(false); // disk is now authoritative
     return { ok: true };
   } catch (error) {
     saveFallbackJson(FALLBACK_STORAGE_KEY, data);
     if (tauriAvailable) {
+      // Real Tauri failure: the newest edits are only in the localStorage
+      // fallback now. Flag it so the next launch recovers from there.
+      setPendingSave(true);
       return { ok: false, error: String(error) };
     }
     return { ok: true };
@@ -518,14 +550,28 @@ function createInitialForm(
   cats: Category[],
   type: CategoryType = "expense",
 ): RecordForm {
+  // cats can be empty (e.g. an import wiped categories and they were all
+  // deleted) — don't deref undefined; leave catId empty so save stays disabled.
   const cat = cats.find((c) => c.type === type) ?? cats[0];
   return {
-    type: cat.type,
-    catId: cat.id,
+    type: cat?.type ?? type,
+    catId: cat?.id ?? "",
     amount: "",
     date: today(),
     note: "",
   };
+}
+
+// Shared by saveRecord() and the modal's save button so they can't drift.
+function isRecordFormComplete(form: RecordForm): boolean {
+  const amount = Number(form.amount);
+  return (
+    !!form.catId &&
+    !!form.date &&
+    !!form.amount &&
+    Number.isFinite(amount) &&
+    amount > 0
+  );
 }
 
 type BreakdownItem = Category & { amount: number };
@@ -735,6 +781,11 @@ function App() {
             data.categories.length > 0 ? data.categories : DEFAULT_CATEGORIES,
           );
           setOpeningBalance(data.openingBalance);
+          // Recovered from the localStorage fallback after a prior failed save:
+          // force the first persist tick to write it back to disk (re-saving
+          // clears the pending flag on success) instead of skipping it as a
+          // no-op. Mirrors the seed path's pre-arm.
+          if (hasPendingSave()) persistedSinceLoadRef.current = true;
         }
         setStorageLoaded(true);
       })
@@ -1083,9 +1134,8 @@ function App() {
   }
 
   function saveRecord() {
+    if (!isRecordFormComplete(form)) return;
     const amount = Number(form.amount);
-    if (!form.catId || !form.amount || !Number.isFinite(amount) || amount <= 0)
-      return;
 
     const note = form.note.trim();
     const noteField = note ? { note } : {};
@@ -1255,6 +1305,9 @@ function App() {
       const usedIds = new Set<string>();
       const importedCats: Category[] = [];
       const catByKey = new Map<string, Category>();
+      // name(lowercased) → its type, or "ambiguous" if the same name appears
+      // under both types. Used to classify records whose row has no 类型 cell.
+      const typeByName = new Map<string, CategoryType | "ambiguous">();
       const catSheet = wb.Sheets[EXCEL_CATEGORY_SHEET];
 
       if (catSheet) {
@@ -1269,6 +1322,16 @@ function App() {
             readExcelCell(row, ["类型", "收支类型", "type"]),
           );
           if (!name || !type) return;
+          const lname = name.toLowerCase();
+          const seenType = typeByName.get(lname);
+          typeByName.set(
+            lname,
+            seenType !== undefined && seenType !== type ? "ambiguous" : type,
+          );
+          const catKey = `${type}:${name}`;
+          // 同名同类型的重复行：跳过，否则会造出一个 0 记录的幽灵分类
+          // （catByKey 已去重，但 importedCats 仍会被推入两次）。
+          if (catByKey.has(catKey)) return;
           const rawId = String(readExcelCell(row, ["分类ID", "id"])).trim();
           const id =
             rawId && !usedIds.has(rawId)
@@ -1286,7 +1349,7 @@ function App() {
             : PALETTE[idx % PALETTE.length];
           const cat: Category = { id, name, type, shape, swatch };
           importedCats.push(cat);
-          catByKey.set(`${type}:${name}`, cat);
+          catByKey.set(catKey, cat);
         });
       }
 
@@ -1303,10 +1366,20 @@ function App() {
         const typeFromCell = parseCategoryType(
           readExcelCell(row, ["类型", "收支类型", "type"]),
         );
-        const type = typeFromCell ?? (rawAmount < 0 ? "expense" : "income");
         const categoryName = String(
           readExcelCell(row, ["分类", "分类名称", "category"]),
         ).trim();
+        // 无「类型」列时：优先按分类表里同名分类的类型判定 —— 导出的金额恒为正，
+        // 单看符号会把所有支出误判成收入。仅当分类表查不到 / 同名跨类型有歧义时，
+        // 才退回按金额符号猜测。
+        const knownType = typeByName.get(categoryName.toLowerCase());
+        const type =
+          typeFromCell ??
+          (knownType && knownType !== "ambiguous"
+            ? knownType
+            : rawAmount < 0
+              ? "expense"
+              : "income");
         const date = parseExcelDate(readExcelCell(row, ["日期", "date"]), XLSX);
         const amount = Math.abs(rawAmount);
         if (
@@ -3251,6 +3324,9 @@ function NewRecordModal({
   onSave: () => void;
 }) {
   const cats = categories.filter((c) => c.type === form.type);
+  const onEnterSave = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") onSave();
+  };
 
   function setType(t: CategoryType) {
     const first = categories.find((c) => c.type === t);
@@ -3326,6 +3402,7 @@ function NewRecordModal({
             onChange={(e) =>
               setForm((f) => ({ ...f, amount: e.target.value.replace(/[^\d.]/g, "") }))
             }
+            onKeyDown={onEnterSave}
             inputMode="decimal"
           />
           <div className="v2-modal-pad">
@@ -3384,6 +3461,7 @@ function NewRecordModal({
               onChange={(e) =>
                 setForm((f) => ({ ...f, note: e.target.value }))
               }
+              onKeyDown={onEnterSave}
             />
           </div>
         </div>
@@ -3398,7 +3476,7 @@ function NewRecordModal({
             type="button"
             className="v2-btn-primary"
             onClick={onSave}
-            disabled={!form.amount || Number(form.amount) <= 0 || !form.catId}
+            disabled={!isRecordFormComplete(form)}
           >
             {isEdit ? "保 存 修 改" : "保 存 记 录 · ⏎"}
           </button>
