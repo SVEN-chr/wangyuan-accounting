@@ -15,6 +15,7 @@ A desktop bookkeeping app ("书业账房 / 王源专属记账工作台") — Tau
 - `pnpm preview` — preview the built bundle
 - `pnpm tauri dev` — full desktop app (Vite + Rust + WebView). `beforeDevCommand` runs `pnpm dev` automatically
 - `pnpm tauri build` — bundle production desktop binary
+- `pnpm icons` — regenerate all app icons from `src-tauri/icons/icon-source.svg`. `scripts/build-icons.mjs` renders the SVG to a 1024² PNG via `@resvg/resvg-js` (pure-WASM, loads system fonts so the CJK glyph 账 resolves), then hands it to `pnpm tauri icon` to emit every size + `.ico` + `.icns`. Run only after editing the source SVG.
 
 Type-check only (no emit, fastest signal): `pnpm exec tsc --noEmit`
 
@@ -33,9 +34,11 @@ The app has three distinct names — keep them straight:
 
 **Windows bundling is NSIS-only.** `bundle.targets` deliberately excludes `msi`. WiX 3's `light.exe` fails when `productName` contains CJK characters (encodes the MSI filename in the ANSI codepage and dies). NSIS handles UTF-8 and Chinese installer filenames cleanly. The NSIS config enables `SimpChinese` + `English` languages with `displayLanguageSelector: false`, so the installer auto-picks based on system locale. **Don't add `"msi"` back** unless someone first solves the CJK encoding problem upstream.
 
-## Repo layout — main worktree + feature worktrees
+## Repo layout — commit directly to `main`
 
-The main checkout lives at `D:/project/codex-project/demo07` (branch `main`). Feature branches are git worktrees under `.claude/worktrees/<branch-slug>/`. To merge a feature into main without `cd`-ing around:
+**The maintainer works solo and wants changes committed straight to `main` — do not auto-create a feature branch before committing.** This overrides the usual "branch first on the default branch" reflex for this repo.
+
+The main checkout lives at `D:/project/codex-project/demo07` (branch `main`). When branches/worktrees *are* explicitly in play, feature branches live as git worktrees under `.claude/worktrees/<branch-slug>/`. To merge one into main without `cd`-ing around:
 
 ```
 git -C "D:/project/codex-project/demo07" merge --ff-only <branch>
@@ -103,7 +106,7 @@ If storage is empty AND `accounting.first-run-seeded` localStorage flag is unset
 ### Domain model
 
 - `Category`: `{ id, name, type: "expense"|"income", shape: square|circle|diamond|triangle|halfcircle, swatch: hex }`. `CatGlyph` renders the shape from these fields — categories are deliberately icon-less, distinguished by shape+color.
-- `RecordItem`: `{ id, catId, amount, date: "YYYY-MM-DD", note? }`. Amounts always positive; sign comes from the category's type.
+- `RecordItem`: `{ id, catId, amount, date: "YYYY-MM-DD", note? }`. Amounts always positive; sign comes from the category's type. A record is savable only when `isRecordFormComplete(form)` holds — non-empty `catId` **and** `date`, plus a finite `amount > 0`. That one predicate backs both `saveRecord`'s early-return guard and the modal save-button `disabled`; keep both on it (don't re-inline a partial check) so an empty-date or empty-category record can never be written.
 - `openingBalance`: editable via the receipt rail's 期初 row in the Ledger page; persisted alongside records/categories.
 - `DEFAULT_CATEGORIES` are protected: `deleteCategory` refuses to remove them via the `DEFAULT_CATEGORY_IDS` Set. Custom categories use `custom-${Date.now()}` ids; Excel-imported ones use `excel-${type}-${slug}`. All id minting is **collision-checked** against existing ids — the `Date.now()`-based mints (new record in `saveRecord`, new category in `addCategory`) bump on the rare same-millisecond clash, and Excel import de-dups record ids against a running set. `addCategory` also **rejects a duplicate name+type** so an export→import round-trip (which keys categories on `type:name`) can't silently merge two same-named categories.
 
@@ -115,7 +118,9 @@ The App-level `useMemo` builds `catsById: Map<string, Category>` once and expose
 
 ### Excel import/export
 
-Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. Import overwrites everything after a `window.confirm`. Headers are language-tolerant (see `readExcelCell` candidate keys: `分类名称|分类|name`, `日期|date`, etc.) so users can hand-edit the file. Categories without a `形状`/`颜色` cell get auto-assigned from the `SHAPES` and `PALETTE` arrays.
+Three-sheet xlsx (`收支记录` / `分类` / `汇总`) via the `xlsx` library. Import overwrites `records` + `categories` (but **not** `openingBalance`) after a `window.confirm`. Headers are language-tolerant (see `readExcelCell` candidate keys: `分类名称|分类|name`, `日期|date`, etc.) so users can hand-edit the file. Categories without a `形状`/`颜色` cell get auto-assigned from the `SHAPES` and `PALETTE` arrays.
+
+**Type inference & category de-dup on import.** Exported 金额 is always **positive** (sign lives in the category type), so a record row with no `类型` cell can't be classified by sign alone — `importFromFile` first builds a `typeByName` map from the 分类 sheet and resolves the row's type from the same-named category, falling back to the amount sign only when that name is unknown or appears under *both* types (recorded as `"ambiguous"`). Pure sign-guessing would re-classify every exported expense as income. The 分类 loop also **skips duplicate `type:name` rows** (mirrors `addCategory`'s reject-duplicate rule) so a hand-edited sheet can't fork a phantom zero-record category — `catByKey` de-dups, but `importedCats` must be guarded too or both copies get pushed.
 
 **`xlsx` is lazy-loaded.** The module (~430 KB) is not in the initial chunk — `exportBackup` and `importFromFile` first call `await loadXLSX()` (a memoized `import("xlsx")`) before touching `XLSX.utils.*`. `parseExcelDate` takes the loaded module as a parameter rather than importing at the top. Don't reintroduce `import * as XLSX from "xlsx"` at the top of `App.tsx` — it pulls SheetJS into every cold launch even though only the Backup page needs it.
 
