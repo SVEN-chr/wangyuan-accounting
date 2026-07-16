@@ -56,6 +56,9 @@ jobs:
             echo "value=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Validate application version
+        run: node scripts/check-version.mjs "${{ steps.tag.outputs.value }}"
+
       - name: Build Tauri app & publish release
         uses: tauri-apps/tauri-action@v0
         env:

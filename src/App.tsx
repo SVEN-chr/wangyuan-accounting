@@ -5,7 +5,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 
 type XLSXModule = typeof import("xlsx");
@@ -61,6 +61,12 @@ type PersistedAccountingData = {
   records: RecordItem[];
   categories: Category[];
   openingBalance: number;
+};
+
+type LoadedAccountingData = {
+  data: PersistedAccountingData;
+  storeExists: boolean;
+  recoveredPending: boolean;
 };
 
 type ExcelRow = Record<string, unknown>;
@@ -120,6 +126,7 @@ const FIRST_RUN_KEY = "accounting.first-run-seeded";
 // fallback); read on next launch to recover from the fallback instead of the
 // stale on-disk copy. Cleared on the first successful save.
 const PENDING_SAVE_KEY = "accounting.pending-save";
+const CLOSE_SAVE_TIMEOUT = Symbol("close-save-timeout");
 const DEFAULT_OPENING_BALANCE = 0;
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
@@ -220,7 +227,7 @@ const SAMPLE_RECORDS: RecordItem[] = [
 
 const DEFAULT_CATEGORY_IDS = new Set(DEFAULT_CATEGORIES.map((c) => c.id));
 const EXCEL_DATE_SEPARATOR_RE = /[./]/g;
-const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})/;
+const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
 
 /* =================================================================
    Helpers
@@ -331,11 +338,21 @@ function loadFallbackJson<T>(key: string, fallback: T): T {
   }
 }
 
-function saveFallbackJson<T>(key: string, value: T) {
+function saveFallbackJson<T>(key: string, value: T): boolean {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch {
-    /* swallow — restricted webview */
+    return false;
+  }
+}
+
+function loadConsolidatedFallback(): PersistedAccountingData | null {
+  try {
+    const raw = window.localStorage.getItem(FALLBACK_STORAGE_KEY);
+    return raw ? normalizePersistedAccountingData(JSON.parse(raw)) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -347,12 +364,13 @@ function hasPendingSave(): boolean {
   }
 }
 
-function setPendingSave(pending: boolean) {
+function setPendingSave(pending: boolean): boolean {
   try {
     if (pending) window.localStorage.setItem(PENDING_SAVE_KEY, "1");
     else window.localStorage.removeItem(PENDING_SAVE_KEY);
+    return true;
   } catch {
-    /* swallow — restricted webview */
+    return false;
   }
 }
 
@@ -368,7 +386,9 @@ function migrateCategory(c: Partial<Category>, fallback?: Category): Category {
 }
 
 function loadFallback(): PersistedAccountingData {
-  return loadFallbackJson<PersistedAccountingData>(FALLBACK_STORAGE_KEY, {
+  const consolidated = loadConsolidatedFallback();
+  if (consolidated) return consolidated;
+  return normalizePersistedAccountingData({
     records: loadFallbackJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
     categories: loadFallbackJson<Category[]>(
       CATEGORIES_STORAGE_KEY,
@@ -378,76 +398,248 @@ function loadFallback(): PersistedAccountingData {
       OPENING_BALANCE_STORAGE_KEY,
       DEFAULT_OPENING_BALANCE,
     ),
+  }) ?? {
+    records: [],
+    categories: DEFAULT_CATEGORIES,
+    openingBalance: DEFAULT_OPENING_BALANCE,
+  };
+}
+
+export function shouldSeedAccountingData({
+  data,
+  storeExists,
+  firstRunSeeded,
+}: {
+  data: PersistedAccountingData;
+  storeExists: boolean;
+  firstRunSeeded: boolean;
+}): boolean {
+  if (storeExists || firstRunSeeded || data.records.length > 0) return false;
+  if (data.openingBalance !== DEFAULT_OPENING_BALANCE) return false;
+  if (data.categories.length !== DEFAULT_CATEGORIES.length) return false;
+  return DEFAULT_CATEGORIES.every((category, index) => {
+    const actual = data.categories[index];
+    return (
+      actual?.id === category.id &&
+      actual.name === category.name &&
+      actual.type === category.type &&
+      actual.shape === category.shape &&
+      actual.swatch === category.swatch
+    );
   });
 }
 
-let tauriAvailable: boolean | null = null;
-
-async function loadAccountingData(): Promise<PersistedAccountingData> {
+function hasFirstRunSeeded(): boolean {
   try {
-    const raw = await invoke<string>("load_accounting_store");
-    tauriAvailable = true;
-    if (!raw) return loadFallback();
-    const parsed = JSON.parse(raw) as Partial<PersistedAccountingData>;
-    const recordsOk = Array.isArray(parsed.records);
-    const categoriesOk = Array.isArray(parsed.categories);
-    const balanceOk =
-      typeof parsed.openingBalance === "number" &&
-      Number.isFinite(parsed.openingBalance);
-    if (recordsOk && categoriesOk && balanceOk) {
-      // A prior save failed: the newest edits live only in the localStorage
-      // fallback, while disk still holds the older good copy. Prefer the
-      // fallback — the mount handler arms persist so it gets re-written to disk,
-      // which clears the pending flag on success. (This is the one place the
-      // fallback is consulted past the validity gate; gated on the flag so the
-      // normal disk-is-truth path is untouched.)
-      if (hasPendingSave()) return loadFallback();
-      return {
-        records: parsed.records as RecordItem[],
-        categories: (parsed.categories as Partial<Category>[]).map((c) =>
-          migrateCategory(c),
-        ),
-        openingBalance: parsed.openingBalance as number,
-      };
-    }
-    const fb = loadFallback();
-    return {
-      records: recordsOk ? (parsed.records as RecordItem[]) : fb.records,
-      categories: categoriesOk
-        ? (parsed.categories as Partial<Category>[]).map((c) =>
-            migrateCategory(c),
-          )
-        : fb.categories,
-      openingBalance: balanceOk
-        ? (parsed.openingBalance as number)
-        : fb.openingBalance,
-    };
+    return window.localStorage.getItem(FIRST_RUN_KEY) === "1";
   } catch {
-    tauriAvailable = false;
-    return loadFallback();
+    return false;
   }
 }
 
-type SaveResult = { ok: true } | { ok: false; error: string };
+function markFirstRunSeeded(): boolean {
+  try {
+    window.localStorage.setItem(FIRST_RUN_KEY, "1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadAccountingData(): Promise<LoadedAccountingData> {
+  try {
+    const raw = await invoke<string>("load_accounting_store");
+    const storeExists = raw.length > 0;
+    const parsed = storeExists
+      ? normalizePersistedAccountingData(JSON.parse(raw))
+      : null;
+    const pendingFallback = hasPendingSave()
+      ? loadConsolidatedFallback()
+      : null;
+    if (pendingFallback) {
+      return {
+        data: pendingFallback,
+        storeExists,
+        recoveredPending: true,
+      };
+    }
+    return {
+      data: parsed ?? loadFallback(),
+      storeExists,
+      recoveredPending: false,
+    };
+  } catch {
+    return {
+      data: loadFallback(),
+      // A desktop invoke failure cannot prove the store is absent. Suppress
+      // seeding so a transient read error never overwrites an existing ledger.
+      storeExists: isTauri(),
+      recoveredPending: false,
+    };
+  }
+}
+
+function normalizePersistedAccountingData(
+  value: unknown,
+): PersistedAccountingData | null {
+  if (!value || typeof value !== "object") return null;
+  const parsed = value as Partial<PersistedAccountingData>;
+  if (
+    !Array.isArray(parsed.records) ||
+    !Array.isArray(parsed.categories) ||
+    typeof parsed.openingBalance !== "number" ||
+    !Number.isFinite(parsed.openingBalance)
+  ) {
+    return null;
+  }
+  return {
+    records: parsed.records as RecordItem[],
+    categories: (parsed.categories as Partial<Category>[]).map((category) =>
+      migrateCategory(category),
+    ),
+    openingBalance: parsed.openingBalance,
+  };
+}
+
+type SaveResult =
+  | { ok: true }
+  | { ok: false; error: string; recoverySaved: boolean };
+
+export function createSaveQueue<T, R>(persist: (snapshot: T) => Promise<R>) {
+  let tail: Promise<void> = Promise.resolve();
+  let latest: Promise<R> | null = null;
+
+  return {
+    save(snapshot: T): Promise<R> {
+      const result = tail.then(() => persist(snapshot));
+      latest = result;
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+    isLatest(promise: Promise<R>): boolean {
+      return latest === promise;
+    },
+  };
+}
+
+export function canFinalizeQueuedSave({
+  isLatest,
+  queuedRecoveryGeneration,
+  currentRecoveryGeneration,
+}: {
+  isLatest: boolean;
+  queuedRecoveryGeneration: number;
+  currentRecoveryGeneration: number;
+}): boolean {
+  return (
+    isLatest && queuedRecoveryGeneration === currentRecoveryGeneration
+  );
+}
+
+export function resolveRecoveryPendingState({
+  current,
+  result,
+  finalizedLatest,
+}: {
+  current: boolean;
+  result: SaveResult;
+  finalizedLatest: boolean;
+}): boolean {
+  if (finalizedLatest && result.ok) return false;
+  if (!result.ok && result.recoverySaved) return true;
+  return current;
+}
+
+type SaveSnapshotDependencies = {
+  isDesktop: boolean;
+  saveToDisk: (data: PersistedAccountingData) => Promise<void>;
+  saveFallback: (data: PersistedAccountingData) => boolean;
+  setPending: (pending: boolean) => boolean;
+};
+
+export function storeRecoverySnapshot(
+  data: PersistedAccountingData,
+  dependencies: Pick<
+    SaveSnapshotDependencies,
+    "saveFallback" | "setPending"
+  >,
+): boolean {
+  return (
+    dependencies.saveFallback(data) && dependencies.setPending(true)
+  );
+}
+
+export function finalizeLatestSuccessfulSave(
+  data: PersistedAccountingData,
+  dependencies: {
+    clearPending: () => boolean;
+    hasPending: () => boolean;
+    saveFallback: (snapshot: PersistedAccountingData) => boolean;
+    setPending: (pending: boolean) => boolean;
+  },
+): SaveResult {
+  if (!dependencies.hasPending()) return { ok: true };
+
+  const fallbackSaved = dependencies.saveFallback(data);
+  if (dependencies.clearPending()) return { ok: true };
+
+  const pendingAvailable =
+    dependencies.setPending(true);
+  return {
+    ok: false,
+    error: "磁盘已保存，但本地恢复标记清除失败",
+    recoverySaved: fallbackSaved && pendingAvailable,
+  };
+}
+
+export async function saveAccountingSnapshot(
+  data: PersistedAccountingData,
+  dependencies: SaveSnapshotDependencies,
+): Promise<SaveResult> {
+  try {
+    await dependencies.saveToDisk(data);
+    return { ok: true };
+  } catch (error) {
+    const fallbackSaved = dependencies.saveFallback(data);
+    if (!dependencies.isDesktop) {
+      return fallbackSaved
+        ? { ok: true }
+        : {
+            ok: false,
+            error: "浏览器本地缓存写入失败",
+            recoverySaved: false,
+          };
+    }
+    const recoverySaved =
+      fallbackSaved && dependencies.setPending(true);
+    if (recoverySaved) {
+      return { ok: false, error: describeError(error), recoverySaved: true };
+    }
+    return {
+      ok: false,
+      error: `${describeError(error)} · 本地恢复缓存写入失败`,
+      recoverySaved: false,
+    };
+  }
+}
 
 async function saveAccountingData(
   data: PersistedAccountingData,
 ): Promise<SaveResult> {
-  try {
-    await invoke("save_accounting_store", { payload: JSON.stringify(data) });
-    tauriAvailable = true;
-    setPendingSave(false); // disk is now authoritative
-    return { ok: true };
-  } catch (error) {
-    saveFallbackJson(FALLBACK_STORAGE_KEY, data);
-    if (tauriAvailable) {
-      // Real Tauri failure: the newest edits are only in the localStorage
-      // fallback now. Flag it so the next launch recovers from there.
-      setPendingSave(true);
-      return { ok: false, error: String(error) };
-    }
-    return { ok: true };
-  }
+  return saveAccountingSnapshot(data, {
+    isDesktop: isTauri(),
+    saveToDisk: async (snapshot) => {
+      await invoke("save_accounting_store", {
+        payload: JSON.stringify(snapshot),
+      });
+    },
+    saveFallback: (snapshot) =>
+      saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
+    setPending: setPendingSave,
+  });
 }
 
 function categoryTypeLabel(t: CategoryType) {
@@ -489,7 +681,16 @@ function parseExcelRecordId(value: unknown, fallback: number) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function parseExcelDate(value: unknown, xlsx: XLSXModule) {
+function validLocalDateKey(year: number, month: number, day: number): string {
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+    ? dateKey(date)
+    : "";
+}
+
+export function parseExcelDate(value: unknown, xlsx: XLSXModule) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return dateKey(value);
   }
@@ -497,7 +698,7 @@ function parseExcelDate(value: unknown, xlsx: XLSXModule) {
     const parsed = (xlsx.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
       .parse_date_code?.(value);
     if (parsed) {
-      return dateKey(new Date(parsed.y, parsed.m - 1, parsed.d));
+      return validLocalDateKey(parsed.y, parsed.m, parsed.d);
     }
   }
   const text = String(value ?? "").trim();
@@ -505,7 +706,11 @@ function parseExcelDate(value: unknown, xlsx: XLSXModule) {
   const normalized = text.replace(EXCEL_DATE_SEPARATOR_RE, "-");
   const match = normalized.match(EXCEL_DATE_MATCH_RE);
   if (!match) return "";
-  return dateKey(new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return validLocalDateKey(
+    Number(match[1]),
+    Number(match[2]),
+    Number(match[3]),
+  );
 }
 
 function makeCategoryId(name: string, type: CategoryType, used: Set<string>) {
@@ -572,6 +777,55 @@ function isRecordFormComplete(form: RecordForm): boolean {
     Number.isFinite(amount) &&
     amount > 0
   );
+}
+
+export function isImportableWorkbook({
+  sourceRecordRows,
+  validRecords,
+  importedCategories,
+}: {
+  sourceRecordRows: number;
+  validRecords: number;
+  importedCategories: number;
+}): boolean {
+  return (
+    validRecords > 0 ||
+    (sourceRecordRows === 0 && importedCategories > 0)
+  );
+}
+
+export function buildExcelSummaryRows({
+  stats,
+  openingBalance,
+  recordCount,
+  categoryCount,
+}: {
+  stats: Stats;
+  openingBalance: number;
+  recordCount: number;
+  categoryCount: number;
+}): (string | number)[][] {
+  return [
+    ["指标", "金额"],
+    ["总余额", openingBalance + stats.balance],
+    ["总收入", stats.income],
+    ["总支出", stats.expense],
+    ["记录数量", recordCount],
+    ["分类数量", categoryCount],
+  ];
+}
+
+export function getCategoryDeletionImpact(
+  id: string,
+  categories: Category[],
+  records: RecordItem[],
+): { categoryName: string; affectedRecords: number } | null {
+  const category = categories.find((item) => item.id === id);
+  if (!category) return null;
+  return {
+    categoryName: category.name,
+    affectedRecords: records.filter((record) => record.catId === id).length,
+  };
 }
 
 type BreakdownItem = Category & { amount: number };
@@ -754,15 +1008,24 @@ function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const recoveryPendingRef = useRef(false);
+  const recoveryGenerationRef = useRef(0);
 
   /* ---- load on mount ---- */
   useEffect(() => {
     let cancelled = false;
     loadAccountingData()
-      .then((data) => {
+      .then((loaded) => {
         if (cancelled) return;
-        const seeded = window.localStorage.getItem(FIRST_RUN_KEY);
-        if (!seeded && data.records.length === 0) {
+        recoveryPendingRef.current = loaded.recoveredPending;
+        const data = loaded.data;
+        if (
+          shouldSeedAccountingData({
+            data,
+            storeExists: loaded.storeExists || loaded.recoveredPending,
+            firstRunSeeded: hasFirstRunSeeded(),
+          })
+        ) {
           setRecords(SAMPLE_RECORDS);
           setCategories(DEFAULT_CATEGORIES);
           setOpeningBalance(data.openingBalance);
@@ -770,11 +1033,7 @@ function App() {
           // 让 persist effect 的首个 tick 真正保存，而不是当成「和磁盘相同」跳过 ——
           // 否则首启后未编辑就关窗会丢掉种子，且 FIRST_RUN_KEY 已置位不会再播种。
           persistedSinceLoadRef.current = true;
-          try {
-            window.localStorage.setItem(FIRST_RUN_KEY, "1");
-          } catch {
-            /* ignore */
-          }
+          markFirstRunSeeded();
         } else {
           setRecords(data.records);
           setCategories(
@@ -785,7 +1044,7 @@ function App() {
           // force the first persist tick to write it back to disk (re-saving
           // clears the pending flag on success) instead of skipping it as a
           // no-op. Mirrors the seed path's pre-arm.
-          if (hasPendingSave()) persistedSinceLoadRef.current = true;
+          if (loaded.recoveredPending) persistedSinceLoadRef.current = true;
         }
         setStorageLoaded(true);
       })
@@ -805,6 +1064,12 @@ function App() {
   });
   const pendingSaveRef = useRef<number | null>(null);
   const inFlightSaveRef = useRef<Promise<SaveResult> | null>(null);
+  const saveQueueRef = useRef<ReturnType<
+    typeof createSaveQueue<PersistedAccountingData, SaveResult>
+  > | null>(null);
+  if (!saveQueueRef.current) {
+    saveQueueRef.current = createSaveQueue(saveAccountingData);
+  }
   const storageLoadedRef = useRef(false);
   const closingRef = useRef(false);
   // Skip the first persist tick after storage loads — load fed setRecords/etc with the
@@ -816,14 +1081,46 @@ function App() {
   }, [storageLoaded]);
 
   async function runSave(): Promise<SaveResult> {
-    const promise = saveAccountingData(latestDataRef.current);
+    const snapshot = latestDataRef.current;
+    const queue = saveQueueRef.current!;
+    const queuedRecoveryGeneration = recoveryGenerationRef.current;
+    const promise = queue.save(snapshot);
     inFlightSaveRef.current = promise;
     try {
-      const result = await promise;
+      let result = await promise;
+      let finalizedLatest = false;
+      // Only the newest queued snapshot may clear recovery state. An older save
+      // can finish after close-timeout wrote a newer fallback; clearing pending
+      // there would make the next launch ignore that newer recovery copy.
+      if (
+        result.ok &&
+        canFinalizeQueuedSave({
+          isLatest: queue.isLatest(promise),
+          queuedRecoveryGeneration,
+          currentRecoveryGeneration: recoveryGenerationRef.current,
+        })
+      ) {
+        result = finalizeLatestSuccessfulSave(snapshot, {
+          clearPending: () => setPendingSave(false),
+          hasPending: () =>
+            recoveryPendingRef.current || hasPendingSave(),
+          saveFallback: (latest) =>
+            saveFallbackJson(FALLBACK_STORAGE_KEY, latest),
+          setPending: setPendingSave,
+        });
+        finalizedLatest = true;
+      }
+      recoveryPendingRef.current = resolveRecoveryPendingState({
+        current: recoveryPendingRef.current,
+        result,
+        finalizedLatest,
+      });
       if (!result.ok) {
         setBackupStatus({
           type: "error",
-          message: `保存失败：${result.error} · 已写入本地缓存`,
+          message: result.recoverySaved
+            ? `保存失败：${result.error} · 已写入本地缓存`
+            : `保存失败：${result.error}`,
         });
       }
       return result;
@@ -903,15 +1200,41 @@ function App() {
           closingRef.current = true;
           try {
             // 3s 超时上限：磁盘繁忙 / invoke 卡死时 X 不要永远点不动
-            const result = await Promise.race<SaveResult | null>([
+            const result = await Promise.race<
+              SaveResult | null | typeof CLOSE_SAVE_TIMEOUT
+            >([
               flushSave(),
-              new Promise<null>((resolve) =>
-                window.setTimeout(() => resolve(null), 3000),
+              new Promise<typeof CLOSE_SAVE_TIMEOUT>((resolve) =>
+                window.setTimeout(() => resolve(CLOSE_SAVE_TIMEOUT), 3000),
               ),
             ]);
-            if (result && !result.ok) {
+            if (result === CLOSE_SAVE_TIMEOUT) {
+              const recoverySaved = storeRecoverySnapshot(
+                latestDataRef.current,
+                {
+                  saveFallback: (snapshot) =>
+                    saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
+                  setPending: setPendingSave,
+                },
+              );
+              if (recoverySaved) {
+                recoveryPendingRef.current = true;
+                recoveryGenerationRef.current += 1;
+              }
+              if (!recoverySaved) {
+                const proceed = window.confirm(
+                  "保存超时，且本地恢复缓存写入失败。最后一次编辑可能丢失。\n仍要关闭吗？",
+                );
+                if (!proceed) {
+                  closingRef.current = false;
+                  return;
+                }
+              }
+            } else if (result && !result.ok) {
               const proceed = window.confirm(
-                `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`,
+                result.recoverySaved
+                  ? `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`
+                  : `保存失败：${result.error}\n最后一次编辑可能丢失。\n仍要关闭吗？`,
               );
               if (!proceed) {
                 closingRef.current = false;
@@ -920,6 +1243,27 @@ function App() {
             }
           } catch (error) {
             console.error("[close] flushSave threw", error);
+            const recoverySaved = storeRecoverySnapshot(
+              latestDataRef.current,
+              {
+                saveFallback: (snapshot) =>
+                  saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
+                setPending: setPendingSave,
+              },
+            );
+            if (recoverySaved) {
+              recoveryPendingRef.current = true;
+              recoveryGenerationRef.current += 1;
+            }
+            if (!recoverySaved) {
+              const proceed = window.confirm(
+                "保存异常，且本地恢复缓存写入失败。最后一次编辑可能丢失。\n仍要关闭吗？",
+              );
+              if (!proceed) {
+                closingRef.current = false;
+                return;
+              }
+            }
           }
           // 不 await：await win.close() 会和这个 close-requested handler 互等
           // —— Rust 等 JS handler 返回，JS 在 await close 等 Rust 真关窗。
@@ -987,7 +1331,7 @@ function App() {
         setUpdateState({
           phase: "error",
           error:
-            tauriAvailable !== true
+            !isTauri()
               ? "仅桌面端支持检查更新"
               : describeError(error),
         });
@@ -1006,7 +1350,10 @@ function App() {
     installingRef.current = true;
     try {
       // 安装会退出并重启 App —— 先把最后一笔编辑落盘
-      await flushSave();
+      const saveResult = await flushSave();
+      if (saveResult && !saveResult.ok && !saveResult.recoverySaved) {
+        throw new Error(`更新已取消：${saveResult.error}`);
+      }
       let total = 0;
       let downloaded = 0;
       setUpdateState({
@@ -1198,6 +1545,13 @@ function App() {
 
   function deleteCategory(id: string) {
     if (DEFAULT_CATEGORY_IDS.has(id)) return;
+    const impact = getCategoryDeletionImpact(id, categories, records);
+    if (!impact) return;
+    const warning =
+      impact.affectedRecords > 0
+        ? `删除分类「${impact.categoryName}」会同时永久删除 ${impact.affectedRecords} 条关联账目。此操作无法撤销，确认继续吗？`
+        : `确认删除分类「${impact.categoryName}」吗？`;
+    if (!window.confirm(warning)) return;
     setCategories((items) => items.filter((c) => c.id !== id));
     setRecords((items) => items.filter((r) => r.catId !== id));
   }
@@ -1223,14 +1577,12 @@ function App() {
       形状: c.shape,
       颜色: c.swatch,
     }));
-    const summaryRows: (string | number)[][] = [
-      ["指标", "金额"],
-      ["总余额", stats.balance],
-      ["总收入", stats.income],
-      ["总支出", stats.expense],
-      ["记录数量", records.length],
-      ["分类数量", categories.length],
-    ];
+    const summaryRows = buildExcelSummaryRows({
+      stats,
+      openingBalance,
+      recordCount: records.length,
+      categoryCount: categories.length,
+    });
 
     const wb = XLSX.utils.book_new();
     const recordSheet = XLSX.utils.json_to_sheet(recordRows, {
@@ -1420,7 +1772,13 @@ function App() {
         return items;
       }, []);
 
-      if (importedRecords.length === 0) {
+      if (
+        !isImportableWorkbook({
+          sourceRecordRows: recordRows.length,
+          validRecords: importedRecords.length,
+          importedCategories: importedCats.length,
+        })
+      ) {
         setBackupStatus({
           type: "error",
           message: "导入失败：Excel 中没有有效的收支记录",
@@ -1429,7 +1787,7 @@ function App() {
       }
 
       const ok = window.confirm(
-        `导入会覆盖当前 ${records.length} 条记录、${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录？`,
+        `导入会覆盖当前 ${records.length} 条记录、${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录、${importedCats.length} 个分类？`,
       );
       if (!ok) {
         setBackupStatus({ type: "idle", message: "" });
@@ -1439,7 +1797,7 @@ function App() {
       setCategories(importedCats.length > 0 ? importedCats : DEFAULT_CATEGORIES);
       setBackupStatus({
         type: "success",
-        message: `已导入 ${importedRecords.length} 条记录${
+        message: `已导入 ${importedRecords.length} 条记录、${importedCats.length} 个分类${
           skipped > 0 ? ` · 跳过 ${skipped} 行` : ""
         }`,
       });

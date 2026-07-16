@@ -67,6 +67,7 @@ pnpm install
 pnpm dev              # 仅前端（浏览器，localhost:1420，localStorage 回退）
 pnpm tauri dev        # 完整桌面应用（Vite + Rust + WebView）
 pnpm build            # tsc 类型检查 + Vite 生产构建
+pnpm test             # Vitest 回归测试
 pnpm tauri build      # 打包桌面安装包（Windows NSIS）
 ```
 

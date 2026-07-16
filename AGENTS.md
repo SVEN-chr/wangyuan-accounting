@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -38,7 +38,7 @@ The app has three distinct names — keep them straight:
 
 **The maintainer works solo and wants changes committed straight to `main` — do not auto-create a feature branch before committing.** This overrides the usual "branch first on the default branch" reflex for this repo.
 
-The main checkout lives at `D:/project/wangyuan-accounting` (branch `main`). When branches/worktrees *are* explicitly in play, feature branches live as git worktrees under `.claude/worktrees/<branch-slug>/`. To merge one into main without `cd`-ing around:
+The main checkout lives at `D:/project/wangyuan-accounting` (branch `main`). When branches/worktrees *are* explicitly in play, feature branches live as git worktrees under `.Codex/worktrees/<branch-slug>/`. To merge one into main without `cd`-ing around:
 
 ```
 git -C "D:/project/wangyuan-accounting" merge --ff-only <branch>
