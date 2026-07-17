@@ -2,6 +2,8 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+> `AGENTS.md` is the only maintained source of agent instructions for this repository. Make all future instruction changes here; keep `CLAUDE.md` as a reference to this file only.
+
 ## What this is
 
 A desktop bookkeeping app ("书业账房 / 王源专属记账工作台") — Tauri 2 shell, React 19 + TypeScript frontend, single-page UI built to the "Receipt Ledger" (Variant B) design: warm bone/cream + amber/terracotta palette, ledger-paper texture, perforated receipt cards, JetBrains Mono numerals, oversized typography.
@@ -166,3 +168,17 @@ Entries are **paginated, not capped** (the old `filtered.slice(0, 12)` is gone).
 - Mono-font `.mono` class for caption-style metadata (uppercase, tracked, muted color). All numerical/tabular data uses `font-variant-numeric: tabular-nums`. The full mono fallback stack (`"JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace`) is centralized on the `--v2-mono` CSS variable — use `font-family: var(--v2-mono);` instead of inlining the stack so the fallback chain stays consistent. Inside SVG, prefer `style={{ fontFamily: "var(--v2-mono)" }}` on `<text>` over the `fontFamily="JetBrains Mono"` presentation attribute, because the attribute form can't resolve CSS custom properties and silently drops the fallback chain.
 - Receipt cards (`.v2-receipt`, `.v2-modal-card`) use perforated edges via `radial-gradient` masks (`.v2-receipt-perf` / `.v2-modal-perf`). Keep the perf elements when adding new ledger surfaces.
 - Default categories must not be deletable — the UI hides the delete button via the `DEFAULT_CATEGORY_IDS` Set lookup (don't revert to `DEFAULT_CATEGORIES.some(...)` in render code).
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `SVEN-chr/wangyuan-accounting`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository: domain vocabulary belongs in root `CONTEXT.md`, and architectural decisions belong in `docs/adr/`. See `docs/agents/domain.md`.
