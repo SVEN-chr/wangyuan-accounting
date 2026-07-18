@@ -4,8 +4,12 @@ import type {
   Ledger,
   LedgerEntry,
 } from "./ledgerCommands";
-
-const DAY_OF_WEEK_LABELS = ["日", "一", "二", "三", "四", "五", "六"] as const;
+import {
+  addDaysKey,
+  formatCompactAmount,
+  monthKey,
+  parseDateKey,
+} from "./ledgerFormat";
 
 const UNKNOWN_CATEGORY: Category = {
   id: "unknown",
@@ -96,70 +100,6 @@ export type LedgerQuery = {
   statistics(referenceDay: string): LedgerStatistics;
 };
 
-export function dateKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-export function monthKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-}
-
-export function parseDateKey(key: string): Date {
-  const [year, month, day] = key.split("-").map(Number);
-  return new Date(year, month - 1, day);
-}
-
-export function addDaysKey(key: string, delta: number): string {
-  const date = parseDateKey(key);
-  date.setDate(date.getDate() + delta);
-  return dateKey(date);
-}
-
-export function clampDateKey(key: string, min: string, max: string): string {
-  return key < min ? min : key > max ? max : key;
-}
-
-export function todayKey(): string {
-  return dateKey(new Date());
-}
-
-export function weekdayCN(date: Date | string): string {
-  const localDate = typeof date === "string" ? parseDateKey(date) : date;
-  return DAY_OF_WEEK_LABELS[localDate.getDay()];
-}
-
-export function formatAmount(value: number, decimals = 2): string {
-  return Number(value).toLocaleString("zh-CN", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-}
-
-export function formatMoney(value: number, decimals = 2): string {
-  return `¥${formatAmount(value, decimals)}`;
-}
-
-export function splitMoney(value: number): [string, string] {
-  const sign = value < 0 ? "-" : "";
-  const [integer, decimals] = Math.abs(value).toFixed(2).split(".");
-  return [
-    `${sign}${Number(integer).toLocaleString("zh-CN")}`,
-    `.${decimals}`,
-  ];
-}
-
-export function formatCompactAmount(value: number): string {
-  const absolute = Math.abs(value);
-  const sign = value < 0 ? "−" : "";
-  if (absolute >= 999_950) {
-    return `${sign}${(absolute / 1_000_000).toFixed(1)}M`;
-  }
-  if (absolute >= 1_000) {
-    return `${sign}${(absolute / 1_000).toFixed(1)}K`;
-  }
-  return `${sign}${absolute.toFixed(0)}`;
-}
-
 function offsetMonthKey(key: string, offset: number): string {
   const [year, month] = key.split("-").map(Number);
   return monthKey(new Date(year, month - 1 + offset, 1));
@@ -220,6 +160,25 @@ function buildMonthSeries(
     income: stats.byMonth[key]?.income ?? 0,
     expense: stats.byMonth[key]?.expense ?? 0,
   }));
+}
+
+function summarizeMonths(
+  records: LedgerEntry[],
+  stats: LedgerStats,
+  referenceMonth: string,
+): {
+  series: MonthSeriesItem[];
+  maxValue: number;
+  maxNet: number;
+} {
+  const series = buildMonthSeries(records, stats, referenceMonth);
+  let maxValue = 1;
+  let maxNet = 1;
+  for (const month of series) {
+    maxValue = Math.max(maxValue, month.income, month.expense);
+    maxNet = Math.max(maxNet, Math.abs(month.income - month.expense));
+  }
+  return { series, maxValue, maxNet };
 }
 
 function buildCategoryBreakdown(
@@ -351,19 +310,11 @@ export function createLedgerQuery(ledger: Ledger): LedgerQuery {
       const currentNet = current.income - current.expense;
       const previousNet = previous.income - previous.expense;
       const hasPrevious = previous.income > 0 || previous.expense > 0;
-      const monthSeries = buildMonthSeries(
+      const monthSummary = summarizeMonths(
         ledger.records,
         stats,
         referenceMonth,
       );
-      let maxMonthValue = 1;
-      for (const month of monthSeries) {
-        maxMonthValue = Math.max(
-          maxMonthValue,
-          month.income,
-          month.expense,
-        );
-      }
 
       const previousNets: number[] = [];
       for (let offset = 1; offset <= 5; offset += 1) {
@@ -409,27 +360,17 @@ export function createLedgerQuery(ledger: Ledger): LedgerQuery {
           hasPrevious && previousNet !== 0
             ? ((currentNet - previousNet) / Math.abs(previousNet)) * 100
             : null,
-        monthSeries,
-        maxMonthValue,
+        monthSeries: monthSummary.series,
+        maxMonthValue: monthSummary.maxValue,
         trendNote,
       };
     },
     statistics(referenceDay) {
-      const monthSeries = buildMonthSeries(
+      const monthSummary = summarizeMonths(
         ledger.records,
         stats,
         referenceDay.slice(0, 7),
       );
-      let maxMonthValue = 1;
-      let maxNet = 1;
-      for (const month of monthSeries) {
-        maxMonthValue = Math.max(
-          maxMonthValue,
-          month.income,
-          month.expense,
-        );
-        maxNet = Math.max(maxNet, Math.abs(month.income - month.expense));
-      }
 
       let maxIncomeEntry: LedgerEntry | null = null;
       let incomeTotal = 0;
@@ -466,9 +407,9 @@ export function createLedgerQuery(ledger: Ledger): LedgerQuery {
           expense: breakdown("expense"),
           income: breakdown("income"),
         },
-        monthSeries,
-        maxMonthValue,
-        maxNet,
+        monthSeries: monthSummary.series,
+        maxMonthValue: monthSummary.maxValue,
+        maxNet: monthSummary.maxNet,
         income: {
           maxEntry: maxIncomeEntry,
           mean: incomeCount === 0 ? 0 : incomeTotal / incomeCount,

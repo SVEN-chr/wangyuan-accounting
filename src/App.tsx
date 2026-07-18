@@ -23,7 +23,6 @@ import {
 import {
   addDaysKey,
   clampDateKey as clampKey,
-  createLedgerQuery,
   dateKey,
   formatAmount as fmtAmount,
   formatCompactAmount as fmtCompact,
@@ -31,7 +30,11 @@ import {
   monthKey,
   splitMoney,
   todayKey as today,
+  validLocalDateKey,
   weekdayCN,
+} from "./ledgerFormat";
+import {
+  createLedgerQuery,
   type BreakdownItem,
   type LedgerEntryFilter as EntryFilter,
   type LedgerQuery,
@@ -599,15 +602,6 @@ function parseExcelAmount(value: unknown) {
 function parseExcelRecordId(value: unknown, fallback: number) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function validLocalDateKey(year: number, month: number, day: number): string {
-  const date = new Date(year, month - 1, day);
-  return date.getFullYear() === year &&
-    date.getMonth() === month - 1 &&
-    date.getDate() === day
-    ? dateKey(date)
-    : "";
 }
 
 export function parseExcelDate(value: unknown, xlsx: XLSXModule) {
@@ -2124,7 +2118,6 @@ function LedgerPage({
     );
 
   const monthData = overview.currentMonth;
-  const monthBalance = overview.currentMonth.net;
   const stampDate = dateKey(now).replace(/-/g, " / ");
   const stampTime = now.toLocaleTimeString("zh-CN", {
     hour: "2-digit",
@@ -2172,7 +2165,7 @@ function LedgerPage({
             <div className="v2-rec-row total">
               <span>结  余</span>
               <span className="v2-rec-num mono">
-                {fmtAmount(monthBalance + openingBalance)}
+                {fmtAmount(monthData.balanceWithOpening)}
               </span>
             </div>
           </div>
