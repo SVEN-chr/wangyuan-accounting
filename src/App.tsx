@@ -987,9 +987,6 @@ function App() {
     type: "idle",
     message: "",
   });
-  const [ledgerCommandError, setLedgerCommandError] = useState<string | null>(
-    null,
-  );
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -1447,13 +1444,9 @@ function App() {
   /* ---- actions ---- */
   function dispatchLedger(command: LedgerCommand): LedgerCommandResult {
     const result = applyLedgerCommand(ledgerRef.current, command);
-    if (!result.ok) {
-      setLedgerCommandError(result.error.message);
-      return result;
-    }
+    if (!result.ok) return result;
     ledgerRef.current = result.ledger;
     setLedger(result.ledger);
-    setLedgerCommandError(null);
     return result;
   }
 
@@ -1509,12 +1502,12 @@ function App() {
     if (result.ok) setPendingDelete(null);
   }
 
-  function addCategory(c: Omit<Category, "id">): boolean {
-    return dispatchLedger({
+  function addCategory(c: Omit<Category, "id">): void {
+    dispatchLedger({
       type: "category.create",
       preferredId: Date.now(),
       category: c,
-    }).ok;
+    });
   }
 
   function deleteCategory(id: string) {
@@ -1772,7 +1765,6 @@ function App() {
         categories: importedCats,
       });
       if (!result.ok) {
-        setLedgerCommandError(null);
         setBackupStatus({
           type: "error",
           message: `导入失败：${result.error.message}`,
@@ -1810,18 +1802,6 @@ function App() {
         onPage={setPage}
         onAdd={() => openAddModal("expense")}
       />
-
-      {ledgerCommandError && (
-        <div
-          role="alert"
-          className="v2-save-toast"
-          onClick={() => setLedgerCommandError(null)}
-        >
-          <span className="v2-save-toast-stamp">!</span>
-          <span className="v2-save-toast-msg">{ledgerCommandError}</span>
-          <span className="mono v2-save-toast-hint">点击关闭</span>
-        </div>
-      )}
 
       {backupStatus.type === "error" && page !== "backup" && (
         <div
@@ -3245,7 +3225,7 @@ function CategoriesPage({
   categories: Category[];
   stats: Stats;
   records: RecordItem[];
-  onAdd: (c: Omit<Category, "id">) => boolean;
+  onAdd: (c: Omit<Category, "id">) => void;
   onDelete: (id: string) => void;
 }) {
   const [form, setForm] = useState<CategoryForm>({
@@ -3270,13 +3250,12 @@ function CategoriesPage({
 
   function submit() {
     if (!form.name.trim()) return;
-    const added = onAdd({
+    onAdd({
       name: form.name,
       type: form.type,
       shape: form.shape,
       swatch: form.swatch,
     });
-    if (!added) return;
     setForm({
       name: "",
       type: form.type,

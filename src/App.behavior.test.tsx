@@ -247,14 +247,14 @@ describe("账本用户行为基线", () => {
 
     await screen.findByText("待级联账目");
     fireEvent.click(screen.getByRole("button", { name: "分类" }));
-    fireEvent.change(screen.getByPlaceholderText("例如：办公用品"), {
+    const categoryNameInput = screen.getByPlaceholderText("例如：办公用品");
+    fireEvent.change(categoryNameInput, {
       target: { value: "古籍" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保 存 分 类" }));
     expect(screen.getAllByText("古籍")).toHaveLength(1);
-    expect(screen.getByRole("alert").textContent).toContain(
-      "同一收支类型下已存在分类「古籍」",
-    );
+    expect((categoryNameInput as HTMLInputElement).value).toBe("");
+    expect(screen.queryByRole("alert")).toBeNull();
 
     const categoryCard = screen.getByText("古籍").closest(".v2-cat-card");
     expect(categoryCard).not.toBeNull();
