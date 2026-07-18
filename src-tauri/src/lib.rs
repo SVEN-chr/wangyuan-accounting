@@ -26,7 +26,10 @@ fn accounting_store_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn legacy_accounting_store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     Ok(dir.join(ACCOUNTING_STORE_FILE))
 }
 
@@ -208,7 +211,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ACCOUNTING_STORE_FILE, WORKSPACE_FOLDER_NAME};
+    use super::{atomic_write, ACCOUNTING_STORE_FILE, WORKSPACE_FOLDER_NAME};
+    use std::{fs, time::SystemTime};
 
     #[test]
     fn accounting_store_file_is_json() {
@@ -218,6 +222,36 @@ mod tests {
     #[test]
     fn workspace_folder_uses_user_facing_name() {
         assert_eq!(WORKSPACE_FOLDER_NAME, "王源专属记账工作台的文件夹");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_content_and_removes_temp_file() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "wangyuan-accounting-atomic-write-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test directory should be created");
+        let target = dir.join("accounting-data.json");
+        fs::write(&target, b"old ledger").expect("old ledger should be written");
+
+        atomic_write(&target, b"new complete ledger").expect("atomic write should succeed");
+
+        assert_eq!(
+            fs::read(&target).expect("new ledger should be readable"),
+            b"new complete ledger"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .expect("test directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files should be removed");
+
+        fs::remove_dir_all(dir).expect("test directory should be removed");
     }
 
     #[cfg(target_os = "windows")]
