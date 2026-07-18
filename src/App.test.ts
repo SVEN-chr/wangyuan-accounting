@@ -4,7 +4,6 @@ import {
   saveAccountingSnapshot,
   shouldSeedAccountingData,
   storeRecoverySnapshot,
-  getCategoryDeletionImpact,
   parseExcelDate,
   buildExcelSummaryRows,
   isImportableWorkbook,
@@ -12,6 +11,7 @@ import {
   canFinalizeQueuedSave,
   resolveRecoveryPendingState,
 } from "./App";
+import { createLedgerQuery } from "./ledgerQueries";
 
 describe("账本保存队列", () => {
   it("始终按提交顺序落盘，较旧快照不会后写覆盖较新快照", async () => {
@@ -100,9 +100,9 @@ describe("Excel 空账本往返", () => {
 describe("删除分类", () => {
   it("删除前报告会被级联删除的账目数量", () => {
     expect(
-      getCategoryDeletionImpact(
-        "custom-books",
-        [
+      createLedgerQuery({
+        openingBalance: 0,
+        categories: [
           {
             id: "custom-books",
             name: "古籍",
@@ -111,12 +111,12 @@ describe("删除分类", () => {
             swatch: "#123456",
           },
         ],
-        [
+        records: [
           { id: 1, catId: "custom-books", amount: 10, date: "2026-07-17" },
           { id: 2, catId: "other", amount: 20, date: "2026-07-17" },
         ],
-      ),
-    ).toEqual({ categoryName: "古籍", affectedRecords: 1 });
+      }).categoryDeletionImpact("custom-books"),
+    ).toEqual({ categoryName: "古籍", affectedEntries: 1 });
   });
 });
 

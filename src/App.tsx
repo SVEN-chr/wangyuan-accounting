@@ -20,6 +20,23 @@ import {
   type LedgerCommandResult,
   type LedgerEntry as RecordItem,
 } from "./ledgerCommands";
+import {
+  addDaysKey,
+  clampDateKey as clampKey,
+  createLedgerQuery,
+  dateKey,
+  formatAmount as fmtAmount,
+  formatCompactAmount as fmtCompact,
+  formatMoney as fmtMoney,
+  monthKey,
+  splitMoney,
+  todayKey as today,
+  weekdayCN,
+  type BreakdownItem,
+  type LedgerEntryFilter as EntryFilter,
+  type LedgerQuery,
+  type LedgerStats as Stats,
+} from "./ledgerQueries";
 
 type XLSXModule = typeof import("xlsx");
 let xlsxModulePromise: Promise<XLSXModule> | null = null;
@@ -35,7 +52,6 @@ function loadXLSX(): Promise<XLSXModule> {
 ================================================================= */
 
 type PageKey = "ledger" | "stats" | "cats" | "backup";
-type EntryFilter = "all" | "expense" | "income" | "month";
 
 type RecordForm = {
   type: CategoryType;
@@ -97,15 +113,6 @@ type PendingUpdate = {
   downloadAndInstall: (
     onEvent?: (event: UpdateDownloadEvent) => void,
   ) => Promise<void>;
-};
-
-type Stats = {
-  income: number;
-  expense: number;
-  balance: number;
-  byCat: Record<string, number>;
-  byDay: Record<string, number>;
-  byMonth: Record<string, { income: number; expense: number }>;
 };
 
 const RECORDS_STORAGE_KEY = "accounting.records";
@@ -212,53 +219,6 @@ const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
    Helpers
 ================================================================= */
 
-const dateKey = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const today = () => dateKey(new Date());
-const monthKey = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-/** Rebuild a local Date from a `YYYY-MM-DD` key — never `new Date(key)` (UTC trap). */
-const parseKey = (key: string): Date => {
-  const [y, m, d] = key.split("-").map(Number);
-  return new Date(y, m - 1, d);
-};
-/** Shift a `YYYY-MM-DD` key by `delta` days, staying in local time. */
-const addDaysKey = (key: string, delta: number): string => {
-  const d = parseKey(key);
-  d.setDate(d.getDate() + delta);
-  return dateKey(d);
-};
-
-/** Clamp a `YYYY-MM-DD` key into `[min, max]` (字典序即时间序). */
-const clampKey = (key: string, min: string, max: string): string =>
-  key < min ? min : key > max ? max : key;
-
-const fmtAmount = (n: number, decimals = 2) =>
-  Number(n).toLocaleString("zh-CN", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-
-const fmtMoney = (n: number, decimals = 2) => "¥" + fmtAmount(n, decimals);
-
-const splitMoney = (n: number): [string, string] => {
-  // 用绝对值取整数/小数位，再补回符号 —— 否则 -0.50 会被 Number("-0") 抹成 "0"，丢失负号。
-  const sign = n < 0 ? "-" : "";
-  const parts = Math.abs(n).toFixed(2).split(".");
-  const intPart = sign + Number(parts[0]).toLocaleString("zh-CN");
-  return [intPart, "." + parts[1]];
-};
-
-const fmtCompact = (n: number): string => {
-  const abs = Math.abs(n);
-  const sign = n < 0 ? "−" : "";
-  // 阈值取 999_950 而非 1_000_000：≥999_950 时 (abs/1000).toFixed(1) 会进位成
-  // "1000.0"，应升格成 M 形式（"1.0M"），否则会渲染出更长的 "1000.0K"。
-  if (abs >= 999_950) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
-  return `${sign}${abs.toFixed(0)}`;
-};
-
 const HEAT_COLORS: Array<[number, string]> = [
   [0.5, "#7C3A0E"],
   [0.25, "#C6701D"],
@@ -278,20 +238,6 @@ const netColor = (net: number): string =>
 
 const DOW_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
 
-function buildMonthSeq(records: RecordItem[], anchor: string): string[] {
-  let endMonth = anchor;
-  for (const r of records) {
-    const m = r.date.slice(0, 7);
-    if (m && m > endMonth) endMonth = m;
-  }
-  const [y, m] = endMonth.split("-").map(Number);
-  const seq: string[] = [];
-  for (let i = 5; i >= 0; i--) {
-    seq.push(monthKey(new Date(y, m - 1 - i, 1)));
-  }
-  return seq;
-}
-
 function timeGreeting(d: Date) {
   const h = d.getHours();
   if (h < 5) return "凌晨好";
@@ -301,11 +247,6 @@ function timeGreeting(d: Date) {
   if (h < 17) return "下午好";
   if (h < 19) return "傍晚好";
   return "晚上好";
-}
-
-function weekdayCN(d: Date | string) {
-  const date = typeof d === "string" ? parseKey(d) : d;
-  return DOW_LABEL[date.getDay()];
 }
 
 function loadFallbackJson<T>(key: string, fallback: T): T {
@@ -709,27 +650,6 @@ function makeCategoryId(name: string, type: CategoryType, used: Set<string>) {
   return next;
 }
 
-function computeStats(records: RecordItem[], cats: Category[]): Stats {
-  const byId = new Map(cats.map((c) => [c.id, c]));
-  let income = 0;
-  let expense = 0;
-  const byCat: Record<string, number> = {};
-  const byDay: Record<string, number> = {};
-  const byMonth: Record<string, { income: number; expense: number }> = {};
-  for (const r of records) {
-    const cat = byId.get(r.catId);
-    if (!cat) continue;
-    if (cat.type === "income") income += r.amount;
-    else expense += r.amount;
-    byCat[r.catId] = (byCat[r.catId] || 0) + r.amount;
-    byDay[r.date] = (byDay[r.date] || 0) + (cat.type === "expense" ? r.amount : 0);
-    const m = r.date.slice(0, 7);
-    if (!byMonth[m]) byMonth[m] = { income: 0, expense: 0 };
-    byMonth[m][cat.type] += r.amount;
-  }
-  return { income, expense, balance: income - expense, byCat, byDay, byMonth };
-}
-
 function createInitialForm(
   cats: Category[],
   type: CategoryType = "expense",
@@ -792,39 +712,6 @@ export function buildExcelSummaryRows({
     ["记录数量", recordCount],
     ["分类数量", categoryCount],
   ];
-}
-
-export function getCategoryDeletionImpact(
-  id: string,
-  categories: Category[],
-  records: RecordItem[],
-): { categoryName: string; affectedRecords: number } | null {
-  const category = categories.find((item) => item.id === id);
-  if (!category) return null;
-  return {
-    categoryName: category.name,
-    affectedRecords: records.filter((record) => record.catId === id).length,
-  };
-}
-
-type BreakdownItem = Category & { amount: number };
-
-function categoryBreakdown(
-  cats: Category[],
-  byCat: Record<string, number>,
-  type: CategoryType,
-): { items: BreakdownItem[]; total: number } {
-  const items: BreakdownItem[] = [];
-  let total = 0;
-  for (const c of cats) {
-    if (c.type !== type) continue;
-    const amount = byCat[c.id] || 0;
-    if (amount <= 0) continue;
-    items.push({ ...c, amount });
-    total += amount;
-  }
-  items.sort((a, b) => b.amount - a.amount);
-  return { items, total: total || 1 };
 }
 
 /* =================================================================
@@ -1399,47 +1286,21 @@ function App() {
   }, []);
 
   /* ---- derived ---- */
-  const catsById = useMemo(
-    () => new Map(categories.map((c) => [c.id, c])),
-    [categories],
-  );
-  const getCat = useMemo(() => {
-    const fallback: Category = {
-      id: "unknown",
-      name: "未分类",
-      type: "expense",
-      shape: "square",
-      swatch: "#999",
-    };
-    return (id: string): Category => catsById.get(id) ?? fallback;
-  }, [catsById]);
+  const query = useMemo(() => createLedgerQuery(ledger), [ledger]);
+  const getCat = query.category;
+  const currentMonthKey = monthKey(new Date());
 
   const sortedRecords = useMemo(
-    () =>
-      records
-        .slice()
-        .sort(
-          (a, b) =>
-            b.date.localeCompare(a.date) || b.id - a.id,
-        ),
-    [records],
+    () => query.entries("all", currentMonthKey),
+    [query, currentMonthKey],
   );
 
-  const stats = useMemo(
-    () => computeStats(records, categories),
-    [records, categories],
-  );
+  const stats = query.stats;
 
-  const filteredEntries = useMemo(() => {
-    const month = monthKey(new Date());
-    const predicates: Record<EntryFilter, (r: RecordItem) => boolean> = {
-      all: () => true,
-      expense: (r) => getCat(r.catId).type === "expense",
-      income: (r) => getCat(r.catId).type === "income",
-      month: (r) => r.date.startsWith(month),
-    };
-    return sortedRecords.filter(predicates[entryFilter]);
-  }, [sortedRecords, entryFilter, getCat]);
+  const filteredEntries = useMemo(
+    () => query.entries(entryFilter, currentMonthKey),
+    [query, entryFilter, currentMonthKey],
+  );
 
   /* ---- actions ---- */
   function dispatchLedger(command: LedgerCommand): LedgerCommandResult {
@@ -1512,11 +1373,11 @@ function App() {
 
   function deleteCategory(id: string) {
     if (DEFAULT_CATEGORY_IDS.has(id)) return;
-    const impact = getCategoryDeletionImpact(id, categories, records);
+    const impact = query.categoryDeletionImpact(id);
     if (!impact) return;
     const warning =
-      impact.affectedRecords > 0
-        ? `删除分类「${impact.categoryName}」会同时永久删除 ${impact.affectedRecords} 条关联账目。此操作无法撤销，确认继续吗？`
+      impact.affectedEntries > 0
+        ? `删除分类「${impact.categoryName}」会同时永久删除 ${impact.affectedEntries} 条关联账目。此操作无法撤销，确认继续吗？`
         : `确认删除分类「${impact.categoryName}」吗？`;
     if (!window.confirm(warning)) return;
     dispatchLedger({ type: "category.delete", id });
@@ -1905,16 +1766,12 @@ function App() {
 
       {page === "ledger" && (
         <LedgerPage
-          records={records}
+          query={query}
           filtered={filteredEntries}
-          stats={stats}
-          categories={categories}
-          getCat={getCat}
           entryFilter={entryFilter}
           setEntryFilter={setEntryFilter}
           onEdit={openEditModal}
           onDelete={(r) => setPendingDelete(r)}
-          openingBalance={openingBalance}
           onOpeningBalance={(value) =>
             dispatchLedger({ type: "opening-balance.set", value })
           }
@@ -1922,18 +1779,12 @@ function App() {
       )}
 
       {page === "stats" && (
-        <StatsPage
-          records={records}
-          stats={stats}
-          categories={categories}
-        />
+        <StatsPage query={query} />
       )}
 
       {page === "cats" && (
         <CategoriesPage
-          categories={categories}
-          stats={stats}
-          records={records}
+          query={query}
           onAdd={addCategory}
           onDelete={deleteCategory}
         />
@@ -2172,33 +2023,27 @@ function OpeningBalanceRow({
    Ledger (main) page
 ================================================================= */
 function LedgerPage({
-  records,
+  query,
   filtered,
-  stats,
-  categories,
-  getCat,
   entryFilter,
   setEntryFilter,
   onEdit,
   onDelete,
-  openingBalance,
   onOpeningBalance,
 }: {
-  records: RecordItem[];
+  query: LedgerQuery;
   filtered: RecordItem[];
-  stats: Stats;
-  categories: Category[];
-  getCat: (id: string) => Category;
   entryFilter: EntryFilter;
   setEntryFilter: (f: EntryFilter) => void;
   onEdit: (r: RecordItem) => void;
   onDelete: (r: RecordItem) => void;
-  openingBalance: number;
   onOpeningBalance: (n: number) => void;
 }) {
+  const { openingBalance } = query.ledger;
+  const { stats } = query;
+  const getCat = query.category;
   const now = new Date();
   const todayKey = dateKey(now);
-  const currentMonthKey = monthKey(now);
 
   // Heatmap window end (last visible day), clicked day, and entries page.
   const [heatEnd, setHeatEnd] = useState(todayKey);
@@ -2206,15 +2051,10 @@ function LedgerPage({
   const [entryPage, setEntryPage] = useState(1);
 
   // Navigation bounds — let future-dated records (and earliest history) be reachable.
-  const dateBounds = useMemo(() => {
-    let min = todayKey;
-    let max = todayKey;
-    for (const r of records) {
-      if (r.date < min) min = r.date;
-      if (r.date > max) max = r.date;
-    }
-    return { min, max };
-  }, [records, todayKey]);
+  const dateBounds = useMemo(
+    () => query.dateBounds(todayKey),
+    [query, todayKey],
+  );
 
   // Reset to first page whenever the visible set changes.
   useEffect(() => {
@@ -2228,117 +2068,40 @@ function LedgerPage({
     setHeatEnd((end) => clampKey(end, dateBounds.min, dateBounds.max));
   }, [dateBounds]);
 
-  const dailyAggregates = useMemo(() => {
-    const reference = parseKey(todayKey);
-    reference.setDate(reference.getDate() - 6);
-    const weekStartKey = dateKey(reference);
-    let todayExpense = 0;
-    let weekNet = 0;
-    let recordedToday = 0;
-    let incomeCount = 0;
-    let expenseCount = 0;
-    for (const r of records) {
-      const c = getCat(r.catId);
-      if (c.type === "income") incomeCount += 1;
-      else expenseCount += 1;
-      if (r.date === todayKey) {
-        recordedToday += 1;
-        if (c.type === "expense") todayExpense += r.amount;
-      }
-      if (r.date >= weekStartKey && r.date <= todayKey) {
-        weekNet += c.type === "income" ? r.amount : -r.amount;
-      }
-    }
-    return { todayExpense, weekNet, recordedToday, incomeCount, expenseCount };
-  }, [records, getCat, todayKey]);
-
-  // 6-month series — covers up to latest activity month (handles future-dated records)
-  const monthSeq = useMemo(
-    () => buildMonthSeq(records, currentMonthKey),
-    [records, currentMonthKey],
+  const overview = useMemo(
+    () => query.ledgerOverview(todayKey),
+    [query, todayKey],
   );
-
-  const { maxMonthVal, curNet, momPct } = useMemo(() => {
-    let maxVal = 1;
-    for (const m of monthSeq) {
-      const v = stats.byMonth[m];
-      if (!v) continue;
-      if (v.income > maxVal) maxVal = v.income;
-      if (v.expense > maxVal) maxVal = v.expense;
-    }
-    // 当月/环比锚定真实日历月（currentMonthKey），不要用 monthSeq[5] —— 后者是
-    // max(当前月, 最新记录月)，存在未来日期的记录时会指向未来月，与收据栏的当月数据打架。
-    const [cy, cm] = currentMonthKey.split("-").map(Number);
-    const prevMonthKey = monthKey(new Date(cy, cm - 2, 1));
-    const cur = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
-    const prev = stats.byMonth[prevMonthKey] ?? { income: 0, expense: 0 };
-    const curN = cur.income - cur.expense;
-    const prevN = prev.income - prev.expense;
-    const hasPrev = prev.income > 0 || prev.expense > 0;
-    return {
-      maxMonthVal: maxVal,
-      curNet: curN,
-      momPct:
-        hasPrev && prevN !== 0
-          ? ((curN - prevN) / Math.abs(prevN)) * 100
-          : null,
-    };
-  }, [stats.byMonth, monthSeq, currentMonthKey]);
-
-  const trendNote = useMemo(() => {
-    const cm = stats.byMonth[currentMonthKey];
-    if (!cm || (cm.income === 0 && cm.expense === 0)) {
-      return "本月暂无记录 · 开始记一笔";
-    }
-    const cmNet = cm.income - cm.expense;
-    const [y, m] = currentMonthKey.split("-").map(Number);
-    const prevNets: number[] = [];
-    for (let i = 1; i <= 5; i++) {
-      const key = monthKey(new Date(y, m - 1 - i, 1));
-      const v = stats.byMonth[key];
-      if (v && (v.income !== 0 || v.expense !== 0)) {
-        prevNets.push(v.income - v.expense);
-      }
-    }
-    if (prevNets.length === 0) return "本月节余暂无历史可比";
-    const maxPrev = Math.max(...prevNets);
-    const minPrev = Math.min(...prevNets);
-    if (cmNet > maxPrev) return "本月节余创近半年新高";
-    if (cmNet < minPrev) return "本月节余为近半年新低";
-    if (cmNet >= 0)
-      return `本月节余 ${fmtCompact(cmNet)} · 近半年区间 ${fmtCompact(minPrev)} ~ ${fmtCompact(maxPrev)}`;
-    return `本月入不敷出 · 缺口 ${fmtCompact(Math.abs(cmNet))}`;
-  }, [stats.byMonth, currentMonthKey]);
+  const dailyAggregates = {
+    todayExpense: overview.today.expense,
+    weekNet: overview.weekNet,
+    recordedToday: overview.today.entryCount,
+    incomeCount: overview.entryCounts.income,
+    expenseCount: overview.entryCounts.expense,
+  };
+  const monthSeq = overview.monthSeries.map((month) => month.key);
+  const maxMonthVal = overview.maxMonthValue;
+  const curNet = overview.currentMonth.net;
+  const momPct = overview.monthOverMonthPercent;
+  const trendNote = overview.trendNote;
 
   const expenseBreakdown = useMemo(
-    () => categoryBreakdown(categories, stats.byCat, "expense"),
-    [categories, stats.byCat],
+    () => query.breakdown("expense"),
+    [query],
   );
   const expenseCats = expenseBreakdown.items;
   const totalExp = expenseBreakdown.total;
 
-  const heatDays = useMemo(() => {
-    const days: { date: string; value: number }[] = [];
-    let max = 1;
-    for (let i = HEAT_WINDOW_DAYS - 1; i >= 0; i--) {
-      const key = addDaysKey(heatEnd, -i);
-      const value = stats.byDay[key] || 0;
-      if (value > max) max = value;
-      days.push({ date: key, value });
-    }
-    return { days, max };
-  }, [stats.byDay, heatEnd]);
+  const heatDays = useMemo(
+    () => query.heatmap(heatEnd, HEAT_WINDOW_DAYS),
+    [query, heatEnd],
+  );
 
   // Derived entries list: single-day view when a heat cell is selected, else the
   // filter-driven list. Paginated for both. `filtered` is already date+id sorted.
   const dayList = useMemo(
-    () =>
-      selectedDay
-        ? records
-            .filter((r) => r.date === selectedDay)
-            .sort((a, b) => b.id - a.id)
-        : null,
-    [records, selectedDay],
+    () => (selectedDay ? query.entriesOnDay(selectedDay) : null),
+    [query, selectedDay],
   );
   const displayList = selectedDay ? (dayList as RecordItem[]) : filtered;
   const totalPages = Math.max(
@@ -2360,8 +2123,8 @@ function LedgerPage({
       clampKey(addDaysKey(end, HEAT_WINDOW_DAYS), dateBounds.min, dateBounds.max),
     );
 
-  const monthData = stats.byMonth[currentMonthKey] ?? { income: 0, expense: 0 };
-  const monthBalance = monthData.income - monthData.expense;
+  const monthData = overview.currentMonth;
+  const monthBalance = overview.currentMonth.net;
   const stampDate = dateKey(now).replace(/-/g, " / ");
   const stampTime = now.toLocaleTimeString("zh-CN", {
     hour: "2-digit",
@@ -2490,8 +2253,8 @@ function LedgerPage({
                 </div>
               </div>
               <div className="v2-bar-chart">
-                {monthSeq.map((m) => {
-                  const v = stats.byMonth[m] ?? { income: 0, expense: 0 };
+                {overview.monthSeries.map((v) => {
+                  const m = v.key;
                   return (
                     <div key={m} className="v2-bar-group">
                       <div className="v2-bars">
@@ -2848,93 +2611,41 @@ function BreakdownBars({
   );
 }
 
-function StatsPage({
-  records,
-  stats,
-  categories,
-}: {
-  records: RecordItem[];
-  stats: Stats;
-  categories: Category[];
-}) {
-  const catsById = useMemo(
-    () => new Map(categories.map((c) => [c.id, c])),
-    [categories],
+function StatsPage({ query }: { query: LedgerQuery }) {
+  const todayKey = dateKey(new Date());
+  const report = useMemo(
+    () => query.statistics(todayKey),
+    [query, todayKey],
   );
-
-  const expenseBreakdown = useMemo(
-    () => categoryBreakdown(categories, stats.byCat, "expense"),
-    [categories, stats.byCat],
-  );
-  const incomeBreakdown = useMemo(
-    () => categoryBreakdown(categories, stats.byCat, "income"),
-    [categories, stats.byCat],
-  );
+  const expenseBreakdown = report.breakdowns.expense;
+  const incomeBreakdown = report.breakdowns.income;
   const expenseCats = expenseBreakdown.items;
   const incomeCats = incomeBreakdown.items;
   const totalExp = expenseBreakdown.total;
   const totalInc = incomeBreakdown.total;
 
-  const currentMonthKey = monthKey(new Date());
-  const monthSeq = useMemo(
-    () => buildMonthSeq(records, currentMonthKey),
-    [records, currentMonthKey],
-  );
-  const monthSeries = useMemo(
-    () =>
-      monthSeq.map((m) => ({
-        m,
-        income: stats.byMonth[m]?.income ?? 0,
-        expense: stats.byMonth[m]?.expense ?? 0,
-      })),
-    [monthSeq, stats.byMonth],
-  );
-  const { maxM, maxNet } = useMemo(() => {
-    let max = 1;
-    let netMax = 1;
-    for (const s of monthSeries) {
-      if (s.income > max) max = s.income;
-      if (s.expense > max) max = s.expense;
-      const absNet = Math.abs(s.income - s.expense);
-      if (absNet > netMax) netMax = absNet;
-    }
-    return { maxM: max, maxNet: netMax };
-  }, [monthSeries]);
+  const currentMonthKey = todayKey.slice(0, 7);
+  const monthSeries = report.monthSeries.map((month) => ({
+    m: month.key,
+    income: month.income,
+    expense: month.expense,
+  }));
+  const monthSeq = report.monthSeries.map((month) => month.key);
+  const maxM = report.maxMonthValue;
+  const maxNet = report.maxNet;
 
   const yNet = (net: number) =>
     net >= 0 ? 200 - (net / maxNet) * 120 : 200 + (-net / maxNet) * 70;
 
-  const incomeStats = useMemo(() => {
-    let max: RecordItem | null = null;
-    let total = 0;
-    let count = 0;
-    for (const r of records) {
-      if (catsById.get(r.catId)?.type !== "income") continue;
-      total += r.amount;
-      count += 1;
-      if (!max || r.amount > max.amount) max = r;
-    }
-    return { max, mean: count === 0 ? 0 : total / count };
-  }, [records, catsById]);
-
-  const { dow, maxDow, peakDow } = useMemo(() => {
-    const buckets = [0, 0, 0, 0, 0, 0, 0];
-    for (const r of records) {
-      if (catsById.get(r.catId)?.type === "expense") {
-        buckets[parseKey(r.date).getDay()] += r.amount;
-      }
-    }
-    let max = 1;
-    let peak = 0;
-    for (let i = 0; i < buckets.length; i++) {
-      if (buckets[i] > max) max = buckets[i];
-      if (buckets[i] > buckets[peak]) peak = i;
-    }
-    return { dow: buckets, maxDow: max, peakDow: peak };
-  }, [records, catsById]);
-
-  const savingRate = stats.income > 0 ? (stats.balance / stats.income) * 100 : 0;
-  const ratio = stats.expense > 0 ? stats.income / stats.expense : 0;
+  const incomeStats = {
+    max: report.income.maxEntry,
+    mean: report.income.mean,
+  };
+  const dow = report.expenseByWeekday.values;
+  const maxDow = report.expenseByWeekday.max;
+  const peakDow = report.expenseByWeekday.peakIndex;
+  const savingRate = report.savingRate;
+  const ratio = report.incomeExpenseRatio;
 
   return (
     <>
@@ -3167,7 +2878,7 @@ function StatsPage({
                     <span className="mono">最大单笔收入</span>
                     <span>
                       {incomeStats.max
-                        ? `${catsById.get(incomeStats.max.catId)?.name ?? "未分类"} · ${fmtMoney(incomeStats.max.amount, 0)}`
+                        ? `${query.category(incomeStats.max.catId).name} · ${fmtMoney(incomeStats.max.amount, 0)}`
                         : "—"}
                     </span>
                   </div>
@@ -3216,18 +2927,16 @@ function StatsPage({
    Categories page
 ================================================================= */
 function CategoriesPage({
-  categories,
-  stats,
-  records,
+  query,
   onAdd,
   onDelete,
 }: {
-  categories: Category[];
-  stats: Stats;
-  records: RecordItem[];
+  query: LedgerQuery;
   onAdd: (c: Omit<Category, "id">) => void;
   onDelete: (id: string) => void;
 }) {
+  const { categories } = query.ledger;
+  const { stats } = query;
   const [form, setForm] = useState<CategoryForm>({
     name: "",
     type: "expense",
@@ -3236,17 +2945,13 @@ function CategoriesPage({
   });
 
   const { exp, inc, countByCat } = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const r of records) {
-      counts[r.catId] = (counts[r.catId] || 0) + 1;
-    }
-    const expense: Category[] = [];
-    const income: Category[] = [];
-    for (const c of categories) {
-      (c.type === "expense" ? expense : income).push(c);
-    }
-    return { exp: expense, inc: income, countByCat: counts };
-  }, [categories, records]);
+    const summary = query.categorySummary();
+    return {
+      exp: summary.expense,
+      inc: summary.income,
+      countByCat: summary.entryCountByCategory,
+    };
+  }, [query]);
 
   function submit() {
     if (!form.name.trim()) return;
