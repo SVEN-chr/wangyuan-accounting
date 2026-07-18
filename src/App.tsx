@@ -7,6 +7,19 @@ import {
 } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import "./App.css";
+import {
+  DEFAULT_CATEGORIES,
+  DEFAULT_CATEGORY_IDS,
+  DEFAULT_OPENING_BALANCE,
+  applyLedgerCommand,
+  type Category,
+  type CategoryType,
+  type CatShape,
+  type Ledger,
+  type LedgerCommand,
+  type LedgerCommandResult,
+  type LedgerEntry as RecordItem,
+} from "./ledgerCommands";
 
 type XLSXModule = typeof import("xlsx");
 let xlsxModulePromise: Promise<XLSXModule> | null = null;
@@ -21,26 +34,8 @@ function loadXLSX(): Promise<XLSXModule> {
    Types & constants
 ================================================================= */
 
-type CategoryType = "expense" | "income";
-type CatShape = "square" | "circle" | "diamond" | "triangle" | "halfcircle";
 type PageKey = "ledger" | "stats" | "cats" | "backup";
 type EntryFilter = "all" | "expense" | "income" | "month";
-
-type Category = {
-  id: string;
-  name: string;
-  type: CategoryType;
-  shape: CatShape;
-  swatch: string;
-};
-
-type RecordItem = {
-  id: number;
-  catId: string;
-  amount: number;
-  date: string;
-  note?: string;
-};
 
 type RecordForm = {
   type: CategoryType;
@@ -57,11 +52,7 @@ type CategoryForm = {
   swatch: string;
 };
 
-type PersistedAccountingData = {
-  records: RecordItem[];
-  categories: Category[];
-  openingBalance: number;
-};
+type PersistedAccountingData = Ledger;
 
 type LoadedAccountingData = {
   data: PersistedAccountingData;
@@ -127,7 +118,6 @@ const FIRST_RUN_KEY = "accounting.first-run-seeded";
 // stale on-disk copy. Cleared on the first successful save.
 const PENDING_SAVE_KEY = "accounting.pending-save";
 const CLOSE_SAVE_TIMEOUT = Symbol("close-save-timeout");
-const DEFAULT_OPENING_BALANCE = 0;
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
 const APP_VERSION = "0.1.7";
@@ -182,16 +172,6 @@ const SHAPES: CatShape[] = [
   "halfcircle",
 ];
 
-const DEFAULT_CATEGORIES: Category[] = [
-  { id: "rent", name: "房租", type: "expense", swatch: "#C2410C", shape: "square" },
-  { id: "fuel", name: "加油", type: "expense", swatch: "#9A3412", shape: "diamond" },
-  { id: "parking", name: "停车费", type: "expense", swatch: "#B45309", shape: "circle" },
-  { id: "entertainment", name: "商务招待", type: "expense", swatch: "#92400E", shape: "triangle" },
-  { id: "buy-book", name: "收书", type: "expense", swatch: "#78350F", shape: "halfcircle" },
-  { id: "sell-book", name: "卖书", type: "income", swatch: "#3F6212", shape: "square" },
-  { id: "consult", name: "咨询费", type: "income", swatch: "#4D7C0F", shape: "circle" },
-];
-
 const SAMPLE_RECORDS: RecordItem[] = [
   { id: 101, catId: "sell-book", amount: 4280, date: "2026-05-01", note: "孔网订单 · 古籍三函" },
   { id: 102, catId: "fuel", amount: 312, date: "2026-04-30", note: "嘉实多 95#" },
@@ -225,7 +205,6 @@ const SAMPLE_RECORDS: RecordItem[] = [
   { id: 130, catId: "rent", amount: 6800, date: "2026-04-01", note: "工作室三月" },
 ];
 
-const DEFAULT_CATEGORY_IDS = new Set(DEFAULT_CATEGORIES.map((c) => c.id));
 const EXCEL_DATE_SEPARATOR_RE = /[./]/g;
 const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
 
@@ -987,11 +966,14 @@ function CatGlyph({
 ================================================================= */
 
 function App() {
-  const [records, setRecords] = useState<RecordItem[]>([]);
-  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
-  const [openingBalance, setOpeningBalance] = useState<number>(
-    DEFAULT_OPENING_BALANCE,
-  );
+  const [ledger, setLedger] = useState<Ledger>({
+    records: [],
+    categories: DEFAULT_CATEGORIES,
+    openingBalance: DEFAULT_OPENING_BALANCE,
+  });
+  const ledgerRef = useRef(ledger);
+  ledgerRef.current = ledger;
+  const { records, categories, openingBalance } = ledger;
   const [storageLoaded, setStorageLoaded] = useState(false);
   const [page, setPage] = useState<PageKey>("ledger");
   const [modalOpen, setModalOpen] = useState(false);
@@ -1005,6 +987,9 @@ function App() {
     type: "idle",
     message: "",
   });
+  const [ledgerCommandError, setLedgerCommandError] = useState<string | null>(
+    null,
+  );
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -1026,20 +1011,28 @@ function App() {
             firstRunSeeded: hasFirstRunSeeded(),
           })
         ) {
-          setRecords(SAMPLE_RECORDS);
-          setCategories(DEFAULT_CATEGORIES);
-          setOpeningBalance(data.openingBalance);
+          const seededLedger = {
+            records: SAMPLE_RECORDS,
+            categories: DEFAULT_CATEGORIES,
+            openingBalance: data.openingBalance,
+          };
+          ledgerRef.current = seededLedger;
+          setLedger(seededLedger);
           // 种子数据与磁盘（空）不一致，必须落盘。预先置位持久化跳过标记，
           // 让 persist effect 的首个 tick 真正保存，而不是当成「和磁盘相同」跳过 ——
           // 否则首启后未编辑就关窗会丢掉种子，且 FIRST_RUN_KEY 已置位不会再播种。
           persistedSinceLoadRef.current = true;
           markFirstRunSeeded();
         } else {
-          setRecords(data.records);
-          setCategories(
-            data.categories.length > 0 ? data.categories : DEFAULT_CATEGORIES,
-          );
-          setOpeningBalance(data.openingBalance);
+          const loadedLedger = {
+            ...data,
+            categories:
+              data.categories.length > 0
+                ? data.categories
+                : DEFAULT_CATEGORIES,
+          };
+          ledgerRef.current = loadedLedger;
+          setLedger(loadedLedger);
           // Recovered from the localStorage fallback after a prior failed save:
           // force the first persist tick to write it back to disk (re-saving
           // clears the pending flag on success) instead of skipping it as a
@@ -1057,11 +1050,7 @@ function App() {
   }, []);
 
   /* ---- persist (debounced; flushed on Tauri close-requested + browser beforeunload) ---- */
-  const latestDataRef = useRef<PersistedAccountingData>({
-    records,
-    categories,
-    openingBalance,
-  });
+  const latestDataRef = useRef<PersistedAccountingData>(ledger);
   const pendingSaveRef = useRef<number | null>(null);
   const inFlightSaveRef = useRef<Promise<SaveResult> | null>(null);
   const saveQueueRef = useRef<ReturnType<
@@ -1072,7 +1061,7 @@ function App() {
   }
   const storageLoadedRef = useRef(false);
   const closingRef = useRef(false);
-  // Skip the first persist tick after storage loads — load fed setRecords/etc with the
+  // Skip the first persist tick after storage loads — load fed setLedger with the
   // same values we just read off disk, so saving them back is a guaranteed no-op write.
   const persistedSinceLoadRef = useRef(false);
 
@@ -1152,7 +1141,7 @@ function App() {
   }
 
   useEffect(() => {
-    latestDataRef.current = { records, categories, openingBalance };
+    latestDataRef.current = ledger;
     if (!storageLoaded) return;
     if (!persistedSinceLoadRef.current) {
       persistedSinceLoadRef.current = true;
@@ -1172,7 +1161,7 @@ function App() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [records, categories, openingBalance, storageLoaded]);
+  }, [ledger, storageLoaded]);
 
   useEffect(() => {
     const onBeforeUnload = () => {
@@ -1456,6 +1445,18 @@ function App() {
   }, [sortedRecords, entryFilter, getCat]);
 
   /* ---- actions ---- */
+  function dispatchLedger(command: LedgerCommand): LedgerCommandResult {
+    const result = applyLedgerCommand(ledgerRef.current, command);
+    if (!result.ok) {
+      setLedgerCommandError(result.error.message);
+      return result;
+    }
+    ledgerRef.current = result.ledger;
+    setLedger(result.ledger);
+    setLedgerCommandError(null);
+    return result;
+  }
+
   function openAddModal(type: CategoryType = "expense") {
     setForm(createInitialForm(categories, type));
     setEditId(null);
@@ -1482,65 +1483,38 @@ function App() {
 
   function saveRecord() {
     if (!isRecordFormComplete(form)) return;
-    const amount = Number(form.amount);
-
-    const note = form.note.trim();
-    const noteField = note ? { note } : {};
-
-    if (editId !== null) {
-      setRecords((items) =>
-        items.map((r) =>
-          r.id === editId
-            ? {
-                id: r.id,
-                catId: form.catId,
-                amount,
-                date: form.date,
-                ...noteField,
-              }
-            : r,
-        ),
-      );
-    } else {
-      setRecords((items) => {
-        // 唯一 id：同一毫秒内连加两笔会撞 Date.now()，撞了就 +1 兜底。
-        const used = new Set(items.map((r) => r.id));
-        let id = Date.now();
-        while (used.has(id)) id += 1;
-        return [
-          ...items,
-          {
-            id,
-            catId: form.catId,
-            amount,
-            date: form.date,
-            ...noteField,
-          },
-        ];
-      });
-    }
-    closeModal();
+    const entry = {
+      catId: form.catId,
+      amount: Number(form.amount),
+      date: form.date,
+      note: form.note,
+    };
+    const result =
+      editId !== null
+        ? dispatchLedger({ type: "entry.update", id: editId, entry })
+        : dispatchLedger({
+            type: "entry.create",
+            preferredId: Date.now(),
+            entry,
+          });
+    if (result.ok) closeModal();
   }
 
   function confirmDelete() {
     if (!pendingDelete) return;
-    setRecords((items) => items.filter((r) => r.id !== pendingDelete.id));
-    setPendingDelete(null);
+    const result = dispatchLedger({
+      type: "entry.delete",
+      id: pendingDelete.id,
+    });
+    if (result.ok) setPendingDelete(null);
   }
 
-  function addCategory(c: Omit<Category, "id">) {
-    const trimmed = c.name.trim();
-    if (!trimmed) return;
-    setCategories((items) => {
-      // 同名同类型已存在则忽略：导出/导入按 `type:name` 归并，重复会在往返时丢类别。
-      if (items.some((x) => x.type === c.type && x.name === trimmed)) return items;
-      // 唯一 id：纯 Date.now() 在同一毫秒内连加会撞 id，撞了就追加序号兜底。
-      const used = new Set(items.map((x) => x.id));
-      let id = `custom-${Date.now()}`;
-      let n = 1;
-      while (used.has(id)) id = `custom-${Date.now()}-${n++}`;
-      return [...items, { ...c, name: trimmed, id }];
-    });
+  function addCategory(c: Omit<Category, "id">): boolean {
+    return dispatchLedger({
+      type: "category.create",
+      preferredId: Date.now(),
+      category: c,
+    }).ok;
   }
 
   function deleteCategory(id: string) {
@@ -1552,8 +1526,7 @@ function App() {
         ? `删除分类「${impact.categoryName}」会同时永久删除 ${impact.affectedRecords} 条关联账目。此操作无法撤销，确认继续吗？`
         : `确认删除分类「${impact.categoryName}」吗？`;
     if (!window.confirm(warning)) return;
-    setCategories((items) => items.filter((c) => c.id !== id));
-    setRecords((items) => items.filter((r) => r.catId !== id));
+    dispatchLedger({ type: "category.delete", id });
   }
 
   /* ---- backup ---- */
@@ -1793,8 +1766,19 @@ function App() {
         setBackupStatus({ type: "idle", message: "" });
         return;
       }
-      setRecords(importedRecords);
-      setCategories(importedCats.length > 0 ? importedCats : DEFAULT_CATEGORIES);
+      const result = dispatchLedger({
+        type: "import.replace",
+        records: importedRecords,
+        categories: importedCats,
+      });
+      if (!result.ok) {
+        setLedgerCommandError(null);
+        setBackupStatus({
+          type: "error",
+          message: `导入失败：${result.error.message}`,
+        });
+        return;
+      }
       setBackupStatus({
         type: "success",
         message: `已导入 ${importedRecords.length} 条记录、${importedCats.length} 个分类${
@@ -1826,6 +1810,18 @@ function App() {
         onPage={setPage}
         onAdd={() => openAddModal("expense")}
       />
+
+      {ledgerCommandError && (
+        <div
+          role="alert"
+          className="v2-save-toast"
+          onClick={() => setLedgerCommandError(null)}
+        >
+          <span className="v2-save-toast-stamp">!</span>
+          <span className="v2-save-toast-msg">{ledgerCommandError}</span>
+          <span className="mono v2-save-toast-hint">点击关闭</span>
+        </div>
+      )}
 
       {backupStatus.type === "error" && page !== "backup" && (
         <div
@@ -1939,7 +1935,9 @@ function App() {
           onEdit={openEditModal}
           onDelete={(r) => setPendingDelete(r)}
           openingBalance={openingBalance}
-          onOpeningBalance={setOpeningBalance}
+          onOpeningBalance={(value) =>
+            dispatchLedger({ type: "opening-balance.set", value })
+          }
         />
       )}
 
@@ -3247,7 +3245,7 @@ function CategoriesPage({
   categories: Category[];
   stats: Stats;
   records: RecordItem[];
-  onAdd: (c: Omit<Category, "id">) => void;
+  onAdd: (c: Omit<Category, "id">) => boolean;
   onDelete: (id: string) => void;
 }) {
   const [form, setForm] = useState<CategoryForm>({
@@ -3272,12 +3270,13 @@ function CategoriesPage({
 
   function submit() {
     if (!form.name.trim()) return;
-    onAdd({
+    const added = onAdd({
       name: form.name,
       type: form.type,
       shape: form.shape,
       swatch: form.swatch,
     });
+    if (!added) return;
     setForm({
       name: "",
       type: form.type,
