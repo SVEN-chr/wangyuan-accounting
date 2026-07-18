@@ -93,20 +93,24 @@ fn save_accounting_store(app: AppHandle, payload: String) -> Result<(), String> 
     atomic_write(&path, payload.as_bytes())
 }
 
-#[tauri::command]
-fn save_excel_backup(app: AppHandle, filename: String, bytes: Vec<u8>) -> Result<String, String> {
-    let dir = accounting_workspace_dir(&app)?;
+fn sanitize_backup_filename(filename: &str) -> String {
     let clean_name = PathBuf::from(filename)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("wangyuan-accounting-backup.xlsx")
         .to_string();
-    let filename = if clean_name.to_lowercase().ends_with(".xlsx") {
+    if clean_name.to_lowercase().ends_with(".xlsx") {
         clean_name
     } else {
         format!("{clean_name}.xlsx")
-    };
+    }
+}
+
+#[tauri::command]
+fn save_excel_backup(app: AppHandle, filename: String, bytes: Vec<u8>) -> Result<String, String> {
+    let dir = accounting_workspace_dir(&app)?;
+    let filename = sanitize_backup_filename(&filename);
     let path = dir.join(filename);
 
     // 用户的备份导出同样不可丢：走原子写（tmp + fsync + rename），避免写一半崩溃把上一份好备份毁掉。
@@ -211,7 +215,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic_write, ACCOUNTING_STORE_FILE, WORKSPACE_FOLDER_NAME};
+    use super::{
+        atomic_write, sanitize_backup_filename, ACCOUNTING_STORE_FILE, WORKSPACE_FOLDER_NAME,
+    };
     use std::{fs, time::SystemTime};
 
     #[test]
@@ -252,6 +258,19 @@ mod tests {
         assert!(leftovers.is_empty(), "temporary files should be removed");
 
         fs::remove_dir_all(dir).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn backup_filename_drops_directories_and_requires_xlsx_extension() {
+        assert_eq!(sanitize_backup_filename(r"..\..\账本备份"), "账本备份.xlsx");
+        assert_eq!(
+            sanitize_backup_filename("../../already.xlsx"),
+            "already.xlsx"
+        );
+        assert_eq!(
+            sanitize_backup_filename("   "),
+            "wangyuan-accounting-backup.xlsx"
+        );
     }
 
     #[cfg(target_os = "windows")]
