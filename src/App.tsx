@@ -10,12 +10,9 @@ import "./App.css";
 import {
   DEFAULT_CATEGORIES,
   DEFAULT_CATEGORY_IDS,
-  DEFAULT_OPENING_BALANCE,
-  applyLedgerCommand,
   type Category,
   type CategoryType,
   type CatShape,
-  type Ledger,
   type LedgerCommand,
   type LedgerCommandResult,
   type LedgerEntry as RecordItem,
@@ -40,6 +37,9 @@ import {
   type LedgerQuery,
   type LedgerStats as Stats,
 } from "./ledgerQueries";
+import {
+  createRuntimeLedgerSession,
+} from "./ledgerSession";
 
 type XLSXModule = typeof import("xlsx");
 let xlsxModulePromise: Promise<XLSXModule> | null = null;
@@ -69,14 +69,6 @@ type CategoryForm = {
   type: CategoryType;
   shape: CatShape;
   swatch: string;
-};
-
-type PersistedAccountingData = Ledger;
-
-type LoadedAccountingData = {
-  data: PersistedAccountingData;
-  storeExists: boolean;
-  recoveredPending: boolean;
 };
 
 type ExcelRow = Record<string, unknown>;
@@ -118,16 +110,6 @@ type PendingUpdate = {
   ) => Promise<void>;
 };
 
-const RECORDS_STORAGE_KEY = "accounting.records";
-const CATEGORIES_STORAGE_KEY = "accounting.categories";
-const OPENING_BALANCE_STORAGE_KEY = "accounting.opening-balance";
-const FALLBACK_STORAGE_KEY = "accounting.file-store-fallback";
-const FIRST_RUN_KEY = "accounting.first-run-seeded";
-// Set when a real Tauri save fails (newest edits live only in the localStorage
-// fallback); read on next launch to recover from the fallback instead of the
-// stale on-disk copy. Cleared on the first successful save.
-const PENDING_SAVE_KEY = "accounting.pending-save";
-const CLOSE_SAVE_TIMEOUT = Symbol("close-save-timeout");
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
 const APP_VERSION = "0.1.7";
@@ -250,319 +232,6 @@ function timeGreeting(d: Date) {
   if (h < 17) return "下午好";
   if (h < 19) return "傍晚好";
   return "晚上好";
-}
-
-function loadFallbackJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveFallbackJson<T>(key: string, value: T): boolean {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function loadConsolidatedFallback(): PersistedAccountingData | null {
-  try {
-    const raw = window.localStorage.getItem(FALLBACK_STORAGE_KEY);
-    return raw ? normalizePersistedAccountingData(JSON.parse(raw)) : null;
-  } catch {
-    return null;
-  }
-}
-
-function hasPendingSave(): boolean {
-  try {
-    return window.localStorage.getItem(PENDING_SAVE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function setPendingSave(pending: boolean): boolean {
-  try {
-    if (pending) window.localStorage.setItem(PENDING_SAVE_KEY, "1");
-    else window.localStorage.removeItem(PENDING_SAVE_KEY);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function migrateCategory(c: Partial<Category>, fallback?: Category): Category {
-  const def = fallback ?? DEFAULT_CATEGORIES[0];
-  return {
-    id: c.id ?? def.id,
-    name: c.name ?? def.name,
-    type: (c.type as CategoryType) ?? def.type,
-    shape: (c.shape as CatShape) ?? def.shape,
-    swatch: c.swatch ?? def.swatch,
-  };
-}
-
-function loadFallback(): PersistedAccountingData {
-  const consolidated = loadConsolidatedFallback();
-  if (consolidated) return consolidated;
-  return normalizePersistedAccountingData({
-    records: loadFallbackJson<RecordItem[]>(RECORDS_STORAGE_KEY, []),
-    categories: loadFallbackJson<Category[]>(
-      CATEGORIES_STORAGE_KEY,
-      DEFAULT_CATEGORIES,
-    ),
-    openingBalance: loadFallbackJson<number>(
-      OPENING_BALANCE_STORAGE_KEY,
-      DEFAULT_OPENING_BALANCE,
-    ),
-  }) ?? {
-    records: [],
-    categories: DEFAULT_CATEGORIES,
-    openingBalance: DEFAULT_OPENING_BALANCE,
-  };
-}
-
-export function shouldSeedAccountingData({
-  data,
-  storeExists,
-  firstRunSeeded,
-}: {
-  data: PersistedAccountingData;
-  storeExists: boolean;
-  firstRunSeeded: boolean;
-}): boolean {
-  if (storeExists || firstRunSeeded || data.records.length > 0) return false;
-  if (data.openingBalance !== DEFAULT_OPENING_BALANCE) return false;
-  if (data.categories.length !== DEFAULT_CATEGORIES.length) return false;
-  return DEFAULT_CATEGORIES.every((category, index) => {
-    const actual = data.categories[index];
-    return (
-      actual?.id === category.id &&
-      actual.name === category.name &&
-      actual.type === category.type &&
-      actual.shape === category.shape &&
-      actual.swatch === category.swatch
-    );
-  });
-}
-
-function hasFirstRunSeeded(): boolean {
-  try {
-    return window.localStorage.getItem(FIRST_RUN_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function markFirstRunSeeded(): boolean {
-  try {
-    window.localStorage.setItem(FIRST_RUN_KEY, "1");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function loadAccountingData(): Promise<LoadedAccountingData> {
-  try {
-    const raw = await invoke<string>("load_accounting_store");
-    const storeExists = raw.length > 0;
-    const parsed = storeExists
-      ? normalizePersistedAccountingData(JSON.parse(raw))
-      : null;
-    const pendingFallback = hasPendingSave()
-      ? loadConsolidatedFallback()
-      : null;
-    if (pendingFallback) {
-      return {
-        data: pendingFallback,
-        storeExists,
-        recoveredPending: true,
-      };
-    }
-    return {
-      data: parsed ?? loadFallback(),
-      storeExists,
-      recoveredPending: false,
-    };
-  } catch {
-    return {
-      data: loadFallback(),
-      // A desktop invoke failure cannot prove the store is absent. Suppress
-      // seeding so a transient read error never overwrites an existing ledger.
-      storeExists: isTauri(),
-      recoveredPending: false,
-    };
-  }
-}
-
-function normalizePersistedAccountingData(
-  value: unknown,
-): PersistedAccountingData | null {
-  if (!value || typeof value !== "object") return null;
-  const parsed = value as Partial<PersistedAccountingData>;
-  if (
-    !Array.isArray(parsed.records) ||
-    !Array.isArray(parsed.categories) ||
-    typeof parsed.openingBalance !== "number" ||
-    !Number.isFinite(parsed.openingBalance)
-  ) {
-    return null;
-  }
-  return {
-    records: parsed.records as RecordItem[],
-    categories: (parsed.categories as Partial<Category>[]).map((category) =>
-      migrateCategory(category),
-    ),
-    openingBalance: parsed.openingBalance,
-  };
-}
-
-type SaveResult =
-  | { ok: true }
-  | { ok: false; error: string; recoverySaved: boolean };
-
-export function createSaveQueue<T, R>(persist: (snapshot: T) => Promise<R>) {
-  let tail: Promise<void> = Promise.resolve();
-  let latest: Promise<R> | null = null;
-
-  return {
-    save(snapshot: T): Promise<R> {
-      const result = tail.then(() => persist(snapshot));
-      latest = result;
-      tail = result.then(
-        () => undefined,
-        () => undefined,
-      );
-      return result;
-    },
-    isLatest(promise: Promise<R>): boolean {
-      return latest === promise;
-    },
-  };
-}
-
-export function canFinalizeQueuedSave({
-  isLatest,
-  queuedRecoveryGeneration,
-  currentRecoveryGeneration,
-}: {
-  isLatest: boolean;
-  queuedRecoveryGeneration: number;
-  currentRecoveryGeneration: number;
-}): boolean {
-  return (
-    isLatest && queuedRecoveryGeneration === currentRecoveryGeneration
-  );
-}
-
-export function resolveRecoveryPendingState({
-  current,
-  result,
-  finalizedLatest,
-}: {
-  current: boolean;
-  result: SaveResult;
-  finalizedLatest: boolean;
-}): boolean {
-  if (finalizedLatest && result.ok) return false;
-  if (!result.ok && result.recoverySaved) return true;
-  return current;
-}
-
-type SaveSnapshotDependencies = {
-  isDesktop: boolean;
-  saveToDisk: (data: PersistedAccountingData) => Promise<void>;
-  saveFallback: (data: PersistedAccountingData) => boolean;
-  setPending: (pending: boolean) => boolean;
-};
-
-export function storeRecoverySnapshot(
-  data: PersistedAccountingData,
-  dependencies: Pick<
-    SaveSnapshotDependencies,
-    "saveFallback" | "setPending"
-  >,
-): boolean {
-  return (
-    dependencies.saveFallback(data) && dependencies.setPending(true)
-  );
-}
-
-export function finalizeLatestSuccessfulSave(
-  data: PersistedAccountingData,
-  dependencies: {
-    clearPending: () => boolean;
-    hasPending: () => boolean;
-    saveFallback: (snapshot: PersistedAccountingData) => boolean;
-    setPending: (pending: boolean) => boolean;
-  },
-): SaveResult {
-  if (!dependencies.hasPending()) return { ok: true };
-
-  const fallbackSaved = dependencies.saveFallback(data);
-  if (dependencies.clearPending()) return { ok: true };
-
-  const pendingAvailable =
-    dependencies.setPending(true);
-  return {
-    ok: false,
-    error: "磁盘已保存，但本地恢复标记清除失败",
-    recoverySaved: fallbackSaved && pendingAvailable,
-  };
-}
-
-export async function saveAccountingSnapshot(
-  data: PersistedAccountingData,
-  dependencies: SaveSnapshotDependencies,
-): Promise<SaveResult> {
-  try {
-    await dependencies.saveToDisk(data);
-    return { ok: true };
-  } catch (error) {
-    const fallbackSaved = dependencies.saveFallback(data);
-    if (!dependencies.isDesktop) {
-      return fallbackSaved
-        ? { ok: true }
-        : {
-            ok: false,
-            error: "浏览器本地缓存写入失败",
-            recoverySaved: false,
-          };
-    }
-    const recoverySaved =
-      fallbackSaved && dependencies.setPending(true);
-    if (recoverySaved) {
-      return { ok: false, error: describeError(error), recoverySaved: true };
-    }
-    return {
-      ok: false,
-      error: `${describeError(error)} · 本地恢复缓存写入失败`,
-      recoverySaved: false,
-    };
-  }
-}
-
-async function saveAccountingData(
-  data: PersistedAccountingData,
-): Promise<SaveResult> {
-  return saveAccountingSnapshot(data, {
-    isDesktop: isTauri(),
-    saveToDisk: async (snapshot) => {
-      await invoke("save_accounting_store", {
-        payload: JSON.stringify(snapshot),
-      });
-    },
-    saveFallback: (snapshot) =>
-      saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
-    setPending: setPendingSave,
-  });
 }
 
 function categoryTypeLabel(t: CategoryType) {
@@ -847,15 +516,20 @@ function CatGlyph({
 ================================================================= */
 
 function App() {
-  const [ledger, setLedger] = useState<Ledger>({
-    records: [],
-    categories: DEFAULT_CATEGORIES,
-    openingBalance: DEFAULT_OPENING_BALANCE,
-  });
-  const ledgerRef = useRef(ledger);
-  ledgerRef.current = ledger;
+  const ledgerSessionRef = useRef<ReturnType<
+    typeof createRuntimeLedgerSession
+  > | null>(null);
+  if (!ledgerSessionRef.current) {
+    ledgerSessionRef.current = createRuntimeLedgerSession({
+      seedRecords: SAMPLE_RECORDS,
+    });
+  }
+  const ledgerSession = ledgerSessionRef.current;
+  const [sessionSnapshot, setSessionSnapshot] = useState(() =>
+    ledgerSession.getSnapshot(),
+  );
+  const ledger = sessionSnapshot.ledger;
   const { records, categories, openingBalance } = ledger;
-  const [storageLoaded, setStorageLoaded] = useState(false);
   const [page, setPage] = useState<PageKey>("ledger");
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
@@ -871,288 +545,25 @@ function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  const recoveryPendingRef = useRef(false);
-  const recoveryGenerationRef = useRef(0);
-
-  /* ---- load on mount ---- */
   useEffect(() => {
-    let cancelled = false;
-    loadAccountingData()
-      .then((loaded) => {
-        if (cancelled) return;
-        recoveryPendingRef.current = loaded.recoveredPending;
-        const data = loaded.data;
-        if (
-          shouldSeedAccountingData({
-            data,
-            storeExists: loaded.storeExists || loaded.recoveredPending,
-            firstRunSeeded: hasFirstRunSeeded(),
-          })
-        ) {
-          const seededLedger = {
-            records: SAMPLE_RECORDS,
-            categories: DEFAULT_CATEGORIES,
-            openingBalance: data.openingBalance,
-          };
-          ledgerRef.current = seededLedger;
-          setLedger(seededLedger);
-          // 种子数据与磁盘（空）不一致，必须落盘。预先置位持久化跳过标记，
-          // 让 persist effect 的首个 tick 真正保存，而不是当成「和磁盘相同」跳过 ——
-          // 否则首启后未编辑就关窗会丢掉种子，且 FIRST_RUN_KEY 已置位不会再播种。
-          persistedSinceLoadRef.current = true;
-          markFirstRunSeeded();
-        } else {
-          const loadedLedger = {
-            ...data,
-            categories:
-              data.categories.length > 0
-                ? data.categories
-                : DEFAULT_CATEGORIES,
-          };
-          ledgerRef.current = loadedLedger;
-          setLedger(loadedLedger);
-          // Recovered from the localStorage fallback after a prior failed save:
-          // force the first persist tick to write it back to disk (re-saving
-          // clears the pending flag on success) instead of skipping it as a
-          // no-op. Mirrors the seed path's pre-arm.
-          if (loaded.recoveredPending) persistedSinceLoadRef.current = true;
-        }
-        setStorageLoaded(true);
-      })
-      .catch(() => {
-        if (!cancelled) setStorageLoaded(true);
-      });
+    const unsubscribe = ledgerSession.subscribe(setSessionSnapshot);
+    void ledgerSession.start();
     return () => {
-      cancelled = true;
+      unsubscribe();
+      ledgerSession.dispose();
     };
-  }, []);
-
-  /* ---- persist (debounced; flushed on Tauri close-requested + browser beforeunload) ---- */
-  const latestDataRef = useRef<PersistedAccountingData>(ledger);
-  const pendingSaveRef = useRef<number | null>(null);
-  const inFlightSaveRef = useRef<Promise<SaveResult> | null>(null);
-  const saveQueueRef = useRef<ReturnType<
-    typeof createSaveQueue<PersistedAccountingData, SaveResult>
-  > | null>(null);
-  if (!saveQueueRef.current) {
-    saveQueueRef.current = createSaveQueue(saveAccountingData);
-  }
-  const storageLoadedRef = useRef(false);
-  const closingRef = useRef(false);
-  // Skip the first persist tick after storage loads — load fed setLedger with the
-  // same values we just read off disk, so saving them back is a guaranteed no-op write.
-  const persistedSinceLoadRef = useRef(false);
+  }, [ledgerSession]);
 
   useEffect(() => {
-    storageLoadedRef.current = storageLoaded;
-  }, [storageLoaded]);
+    if (sessionSnapshot.saveStatus.type !== "error") return;
+    setBackupStatus({
+      type: "error",
+      message: sessionSnapshot.saveStatus.message,
+    });
+  }, [sessionSnapshot.saveStatus]);
 
-  async function runSave(): Promise<SaveResult> {
-    const snapshot = latestDataRef.current;
-    const queue = saveQueueRef.current!;
-    const queuedRecoveryGeneration = recoveryGenerationRef.current;
-    const promise = queue.save(snapshot);
-    inFlightSaveRef.current = promise;
-    try {
-      let result = await promise;
-      let finalizedLatest = false;
-      // Only the newest queued snapshot may clear recovery state. An older save
-      // can finish after close-timeout wrote a newer fallback; clearing pending
-      // there would make the next launch ignore that newer recovery copy.
-      if (
-        result.ok &&
-        canFinalizeQueuedSave({
-          isLatest: queue.isLatest(promise),
-          queuedRecoveryGeneration,
-          currentRecoveryGeneration: recoveryGenerationRef.current,
-        })
-      ) {
-        result = finalizeLatestSuccessfulSave(snapshot, {
-          clearPending: () => setPendingSave(false),
-          hasPending: () =>
-            recoveryPendingRef.current || hasPendingSave(),
-          saveFallback: (latest) =>
-            saveFallbackJson(FALLBACK_STORAGE_KEY, latest),
-          setPending: setPendingSave,
-        });
-        finalizedLatest = true;
-      }
-      recoveryPendingRef.current = resolveRecoveryPendingState({
-        current: recoveryPendingRef.current,
-        result,
-        finalizedLatest,
-      });
-      if (!result.ok) {
-        setBackupStatus({
-          type: "error",
-          message: result.recoverySaved
-            ? `保存失败：${result.error} · 已写入本地缓存`
-            : `保存失败：${result.error}`,
-        });
-      }
-      return result;
-    } finally {
-      if (inFlightSaveRef.current === promise) {
-        inFlightSaveRef.current = null;
-      }
-    }
-  }
-
-  // Flush any debounced/in-flight save and await its completion. Shared by the
-  // close-requested handler and the updater (we persist before install+relaunch).
-  async function flushSave(): Promise<SaveResult | null> {
-    if (!storageLoadedRef.current) return null;
-    if (pendingSaveRef.current !== null) {
-      window.clearTimeout(pendingSaveRef.current);
-      pendingSaveRef.current = null;
-      void runSave();
-    }
-    const pending = inFlightSaveRef.current;
-    if (pending) {
-      try {
-        return await pending;
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-
-  useEffect(() => {
-    latestDataRef.current = ledger;
-    if (!storageLoaded) return;
-    if (!persistedSinceLoadRef.current) {
-      persistedSinceLoadRef.current = true;
-      return;
-    }
-    if (pendingSaveRef.current !== null) {
-      window.clearTimeout(pendingSaveRef.current);
-    }
-    pendingSaveRef.current = window.setTimeout(() => {
-      pendingSaveRef.current = null;
-      void runSave();
-    }, 300);
-    return () => {
-      if (pendingSaveRef.current !== null) {
-        window.clearTimeout(pendingSaveRef.current);
-        pendingSaveRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger, storageLoaded]);
-
-  useEffect(() => {
-    const onBeforeUnload = () => {
-      if (pendingSaveRef.current !== null) {
-        window.clearTimeout(pendingSaveRef.current);
-        pendingSaveRef.current = null;
-      }
-      if (storageLoadedRef.current) {
-        saveFallbackJson(FALLBACK_STORAGE_KEY, latestDataRef.current);
-      }
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const mod = await import("@tauri-apps/api/window");
-        if (cancelled) return;
-        const win = mod.getCurrentWindow();
-        const off = await win.onCloseRequested(async (event) => {
-          // 第二次 close-requested 来自我们主动 win.close()，直接放行
-          if (closingRef.current) return;
-          event.preventDefault();
-          closingRef.current = true;
-          try {
-            // 3s 超时上限：磁盘繁忙 / invoke 卡死时 X 不要永远点不动
-            const result = await Promise.race<
-              SaveResult | null | typeof CLOSE_SAVE_TIMEOUT
-            >([
-              flushSave(),
-              new Promise<typeof CLOSE_SAVE_TIMEOUT>((resolve) =>
-                window.setTimeout(() => resolve(CLOSE_SAVE_TIMEOUT), 3000),
-              ),
-            ]);
-            if (result === CLOSE_SAVE_TIMEOUT) {
-              const recoverySaved = storeRecoverySnapshot(
-                latestDataRef.current,
-                {
-                  saveFallback: (snapshot) =>
-                    saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
-                  setPending: setPendingSave,
-                },
-              );
-              if (recoverySaved) {
-                recoveryPendingRef.current = true;
-                recoveryGenerationRef.current += 1;
-              }
-              if (!recoverySaved) {
-                const proceed = window.confirm(
-                  "保存超时，且本地恢复缓存写入失败。最后一次编辑可能丢失。\n仍要关闭吗？",
-                );
-                if (!proceed) {
-                  closingRef.current = false;
-                  return;
-                }
-              }
-            } else if (result && !result.ok) {
-              const proceed = window.confirm(
-                result.recoverySaved
-                  ? `保存失败：${result.error}\n已写入本地缓存，下次启动会尝试恢复。\n仍要关闭吗？`
-                  : `保存失败：${result.error}\n最后一次编辑可能丢失。\n仍要关闭吗？`,
-              );
-              if (!proceed) {
-                closingRef.current = false;
-                return;
-              }
-            }
-          } catch (error) {
-            console.error("[close] flushSave threw", error);
-            const recoverySaved = storeRecoverySnapshot(
-              latestDataRef.current,
-              {
-                saveFallback: (snapshot) =>
-                  saveFallbackJson(FALLBACK_STORAGE_KEY, snapshot),
-                setPending: setPendingSave,
-              },
-            );
-            if (recoverySaved) {
-              recoveryPendingRef.current = true;
-              recoveryGenerationRef.current += 1;
-            }
-            if (!recoverySaved) {
-              const proceed = window.confirm(
-                "保存异常，且本地恢复缓存写入失败。最后一次编辑可能丢失。\n仍要关闭吗？",
-              );
-              if (!proceed) {
-                closingRef.current = false;
-                return;
-              }
-            }
-          }
-          // 不 await：await win.close() 会和这个 close-requested handler 互等
-          // —— Rust 等 JS handler 返回，JS 在 await close 等 Rust 真关窗。
-          void win.close();
-        });
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlisten = off;
-      } catch {
-        /* 浏览器模式 / Tauri API 不可用 —— beforeunload 兜底足够 */
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener("beforeunload", onBeforeUnload);
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Shared by the updater; close-requested and beforeunload are owned by the session.
+  const flushSave = () => ledgerSession.flush();
 
   /* ---- auto-update (Tauri-only; silently no-ops in browser/dev) ---- */
   const pendingUpdateRef = useRef<PendingUpdate | null>(null);
@@ -1298,11 +709,7 @@ function App() {
 
   /* ---- actions ---- */
   function dispatchLedger(command: LedgerCommand): LedgerCommandResult {
-    const result = applyLedgerCommand(ledgerRef.current, command);
-    if (!result.ok) return result;
-    ledgerRef.current = result.ledger;
-    setLedger(result.ledger);
-    return result;
+    return ledgerSession.dispatch(command);
   }
 
   function openAddModal(type: CategoryType = "expense") {

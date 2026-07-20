@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import {
   afterEach,
   beforeEach,
@@ -114,6 +115,26 @@ afterEach(() => {
 });
 
 describe("账本用户行为基线", () => {
+  it("StrictMode effect 重放后仍加载已有账本", async () => {
+    seedLedger([
+      {
+        id: 1,
+        catId: "expense-books",
+        amount: 66,
+        date: "2026-07-18",
+        note: "严格模式账目",
+      },
+    ]);
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    expect(await screen.findByText("严格模式账目")).toBeTruthy();
+  });
+
   it("今天的统计使用本地日期且不包含未来账目", async () => {
     expect(new Date().toISOString()).toBe("2026-07-17T16:30:00.000Z");
     seedLedger([
