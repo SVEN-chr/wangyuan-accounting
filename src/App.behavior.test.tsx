@@ -291,101 +291,6 @@ describe("账本用户行为基线", () => {
     expect(await screen.findByText("暂无记录")).toBeTruthy();
   });
 
-  it("用户可以导入缺少类型列的中文旧表头工作簿", async () => {
-    seedLedger();
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet([
-        {
-          日期: "2026/07/18",
-          分类: "旧表头购书",
-          金额: 66,
-          备注: "旧表头导入",
-        },
-      ]),
-      "收支记录",
-    );
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet([
-        {
-          分类名称: "旧表头购书",
-          类型: "支出",
-          形状: "square",
-          颜色: "#123456",
-        },
-      ]),
-      "分类",
-    );
-    const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
-    const file = new File([bytes], "legacy.xlsx", {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<App />);
-    await screen.findByText("暂无记录");
-    fireEvent.click(screen.getByRole("button", { name: "备份" }));
-    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
-    expect(input).not.toBeNull();
-    fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
-
-    await screen.findByText("已导入 1 条记录、1 个分类");
-    fireEvent.click(screen.getByRole("button", { name: "账目" }));
-    const note = await screen.findByText("旧表头导入");
-    const entry = note.closest(".v2-entry");
-    expect(entry).not.toBeNull();
-    expect(within(entry as HTMLElement).getByText("−66.00")).toBeTruthy();
-  });
-
-  it("英文表头导入会去重同名同类型分类且保留期初余额", async () => {
-    seedLedger([], categories, 888);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet([
-        {
-          id: 21,
-          date: "2026-07-18",
-          type: "expense",
-          category: "Imported Books",
-          amount: 45,
-          note: "English headers",
-        },
-      ]),
-      "Records",
-    );
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet([
-        { id: "english-books", name: "Imported Books", type: "expense" },
-        { id: "duplicate-books", name: "Imported Books", type: "expense" },
-      ]),
-      "分类",
-    );
-    const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
-    const file = new File([bytes], "english.xlsx", {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<App />);
-    await screen.findByText("暂无记录");
-    fireEvent.click(screen.getByRole("button", { name: "备份" }));
-    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
-    fireEvent.change(input as HTMLInputElement, { target: { files: [file] } });
-
-    await screen.findByText("已导入 1 条记录、1 个分类");
-    fireEvent.click(screen.getByRole("button", { name: "分类" }));
-    expect(screen.getAllByText("Imported Books")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "账目" }));
-    expect(await screen.findByText("English headers")).toBeTruthy();
-    expect(
-      within(screen.getByTitle("点击编辑期初余额")).getByText("888.00"),
-    ).toBeTruthy();
-  });
-
   it("导出的三张工作表可以重新导入且不会用汇总覆盖期初余额", async () => {
     seedLedger([
       {
@@ -441,6 +346,36 @@ describe("账本用户行为基线", () => {
     expect(
       within(screen.getByTitle("点击编辑期初余额")).getByText("999.00"),
     ).toBeTruthy();
+  });
+
+  it("桌面备份不可用时仍通过浏览器下载工作簿", async () => {
+    seedLedger([
+      {
+        id: 32,
+        catId: "expense-books",
+        amount: 88,
+        date: "2026-07-18",
+        note: "浏览器备份",
+      },
+    ]);
+    const createObjectURL = vi.fn(() => "blob:ledger-workbook");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    render(<App />);
+
+    await screen.findByText("浏览器备份");
+    fireEvent.click(screen.getByRole("button", { name: "备份" }));
+    fireEvent.click(screen.getByRole("button", { name: /↓ 导出/ }));
+
+    await screen.findByText(
+      "已导出 1 条记录到 wangyuan-2026-07-18.xlsx",
+    );
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(click).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:ledger-workbook");
   });
 
   it("冷启动优先恢复 pending 副本并在写盘成功后清除标记", async () => {

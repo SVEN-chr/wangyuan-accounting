@@ -5,9 +5,11 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 import {
+  CATEGORY_SHAPES,
+  CATEGORY_SWATCHES,
   DEFAULT_CATEGORIES,
   DEFAULT_CATEGORY_IDS,
   type Category,
@@ -25,7 +27,6 @@ import {
   monthKey,
   splitMoney,
   todayKey as today,
-  validLocalDateKey,
   weekdayCN,
 } from "./ledgerFormat";
 import {
@@ -35,16 +36,12 @@ import {
   type LedgerQuery,
   type LedgerStats as Stats,
 } from "./ledgerQueries";
+import {
+  decodeLedgerWorkbook,
+  encodeLedgerWorkbook,
+} from "./ledgerWorkbook";
+import { deliverLedgerWorkbookFile } from "./ledgerWorkbookFile";
 import { useRuntimeLedgerSession } from "./useLedgerSession";
-
-type XLSXModule = typeof import("xlsx");
-let xlsxModulePromise: Promise<XLSXModule> | null = null;
-function loadXLSX(): Promise<XLSXModule> {
-  if (!xlsxModulePromise) {
-    xlsxModulePromise = import("xlsx");
-  }
-  return xlsxModulePromise;
-}
 
 /* =================================================================
    Types & constants
@@ -66,8 +63,6 @@ type CategoryForm = {
   shape: CatShape;
   swatch: string;
 };
-
-type ExcelRow = Record<string, unknown>;
 
 type BackupStatus = {
   type: "idle" | "success" | "error";
@@ -135,30 +130,6 @@ function updatePercentLabel(s: UpdateState, fallback: string): string {
 }
 const ENTRIES_PER_PAGE = 12;
 const HEAT_WINDOW_DAYS = 42;
-const EXCEL_RECORD_SHEET = "收支记录";
-const EXCEL_CATEGORY_SHEET = "分类";
-const EXCEL_SUMMARY_SHEET = "汇总";
-const EXCEL_RECORD_HEADERS = ["记录ID", "日期", "类型", "分类", "金额", "备注"];
-const EXCEL_CATEGORY_HEADERS = ["分类ID", "分类名称", "类型", "形状", "颜色"];
-
-const PALETTE = [
-  "#B5532A",
-  "#7C3A0E",
-  "#5C7C2C",
-  "#92400E",
-  "#9B2226",
-  "#3D405B",
-  "#264653",
-  "#000000",
-];
-
-const SHAPES: CatShape[] = [
-  "square",
-  "circle",
-  "diamond",
-  "triangle",
-  "halfcircle",
-];
 
 const SAMPLE_RECORDS: RecordItem[] = [
   { id: 101, catId: "sell-book", amount: 4280, date: "2026-05-01", note: "孔网订单 · 古籍三函" },
@@ -192,9 +163,6 @@ const SAMPLE_RECORDS: RecordItem[] = [
   { id: 129, catId: "entertainment", amount: 360, date: "2026-04-02" },
   { id: 130, catId: "rent", amount: 6800, date: "2026-04-01", note: "工作室三月" },
 ];
-
-const EXCEL_DATE_SEPARATOR_RE = /[./]/g;
-const EXCEL_DATE_MATCH_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
 
 /* =================================================================
    Helpers
@@ -230,85 +198,6 @@ function timeGreeting(d: Date) {
   return "晚上好";
 }
 
-function categoryTypeLabel(t: CategoryType) {
-  return t === "income" ? "收入" : "支出";
-}
-
-function parseCategoryType(value: unknown): CategoryType | null {
-  const text = String(value ?? "").trim().toLowerCase();
-  if (["收入", "income", "in", "收"].includes(text)) return "income";
-  if (["支出", "expense", "out", "支"].includes(text)) return "expense";
-  return null;
-}
-
-function parseShape(value: unknown): CatShape | null {
-  const t = String(value ?? "").trim().toLowerCase();
-  return (SHAPES as readonly string[]).includes(t) ? (t as CatShape) : null;
-}
-
-function readExcelCell(row: ExcelRow, keys: string[]): unknown {
-  for (const key of keys) {
-    const value = row[key];
-    if (value !== undefined && value !== null && String(value).trim() !== "")
-      return value;
-  }
-  return "";
-}
-
-function parseExcelAmount(value: unknown) {
-  if (typeof value === "number") return value;
-  const cleaned = String(value ?? "")
-    .replace(/[¥￥,\s]/g, "")
-    .trim();
-  const a = Number(cleaned);
-  return Number.isFinite(a) ? a : NaN;
-}
-
-function parseExcelRecordId(value: unknown, fallback: number) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-export function parseExcelDate(value: unknown, xlsx: XLSXModule) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return dateKey(value);
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const parsed = (xlsx.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null })
-      .parse_date_code?.(value);
-    if (parsed) {
-      return validLocalDateKey(parsed.y, parsed.m, parsed.d);
-    }
-  }
-  const text = String(value ?? "").trim();
-  if (!text) return "";
-  const normalized = text.replace(EXCEL_DATE_SEPARATOR_RE, "-");
-  const match = normalized.match(EXCEL_DATE_MATCH_RE);
-  if (!match) return "";
-  return validLocalDateKey(
-    Number(match[1]),
-    Number(match[2]),
-    Number(match[3]),
-  );
-}
-
-function makeCategoryId(name: string, type: CategoryType, used: Set<string>) {
-  const slug = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^\da-z一-龥]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const base = `excel-${type}-${slug || "category"}`;
-  let next = base;
-  let i = 1;
-  while (used.has(next)) {
-    i += 1;
-    next = `${base}-${i}`;
-  }
-  used.add(next);
-  return next;
-}
-
 function createInitialForm(
   cats: Category[],
   type: CategoryType = "expense",
@@ -335,42 +224,6 @@ function isRecordFormComplete(form: RecordForm): boolean {
     Number.isFinite(amount) &&
     amount > 0
   );
-}
-
-export function isImportableWorkbook({
-  sourceRecordRows,
-  validRecords,
-  importedCategories,
-}: {
-  sourceRecordRows: number;
-  validRecords: number;
-  importedCategories: number;
-}): boolean {
-  return (
-    validRecords > 0 ||
-    (sourceRecordRows === 0 && importedCategories > 0)
-  );
-}
-
-export function buildExcelSummaryRows({
-  stats,
-  openingBalance,
-  recordCount,
-  categoryCount,
-}: {
-  stats: Stats;
-  openingBalance: number;
-  recordCount: number;
-  categoryCount: number;
-}): (string | number)[][] {
-  return [
-    ["指标", "金额"],
-    ["总余额", openingBalance + stats.balance],
-    ["总收入", stats.income],
-    ["总支出", stats.expense],
-    ["记录数量", recordCount],
-    ["分类数量", categoryCount],
-  ];
 }
 
 /* =================================================================
@@ -673,13 +526,6 @@ function App() {
   const getCat = query.category;
   const currentMonthKey = monthKey(new Date());
 
-  const sortedRecords = useMemo(
-    () => query.entries("all", currentMonthKey),
-    [query, currentMonthKey],
-  );
-
-  const stats = query.stats;
-
   const filteredEntries = useMemo(
     () => query.entries(entryFilter, currentMonthKey),
     [query, entryFilter, currentMonthKey],
@@ -760,81 +606,17 @@ function App() {
 
   /* ---- backup ---- */
   async function exportBackup() {
-    const XLSX = await loadXLSX();
-    const recordRows = sortedRecords.map((record) => {
-      const c = getCat(record.catId);
-      return {
-        记录ID: record.id,
-        日期: record.date,
-        类型: categoryTypeLabel(c.type),
-        分类: c.name,
-        金额: record.amount,
-        备注: record.note ?? "",
-      };
-    });
-    const categoryRows = categories.map((c) => ({
-      分类ID: c.id,
-      分类名称: c.name,
-      类型: categoryTypeLabel(c.type),
-      形状: c.shape,
-      颜色: c.swatch,
-    }));
-    const summaryRows = buildExcelSummaryRows({
-      stats,
-      openingBalance,
-      recordCount: records.length,
-      categoryCount: categories.length,
-    });
-
-    const wb = XLSX.utils.book_new();
-    const recordSheet = XLSX.utils.json_to_sheet(recordRows, {
-      header: EXCEL_RECORD_HEADERS,
-    });
-    const categorySheet = XLSX.utils.json_to_sheet(categoryRows, {
-      header: EXCEL_CATEGORY_HEADERS,
-    });
-    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
-    recordSheet["!cols"] = [
-      { wch: 16 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 16 },
-      { wch: 12 },
-      { wch: 24 },
-    ];
-    categorySheet["!cols"] = [
-      { wch: 24 },
-      { wch: 16 },
-      { wch: 10 },
-      { wch: 12 },
-      { wch: 12 },
-    ];
-    summarySheet["!cols"] = [{ wch: 14 }, { wch: 14 }];
-    XLSX.utils.book_append_sheet(wb, recordSheet, EXCEL_RECORD_SHEET);
-    XLSX.utils.book_append_sheet(wb, categorySheet, EXCEL_CATEGORY_SHEET);
-    XLSX.utils.book_append_sheet(wb, summarySheet, EXCEL_SUMMARY_SHEET);
     const filename = `wangyuan-${today()}.xlsx`;
-
-    try {
-      const content = XLSX.write(wb, {
-        bookType: "xlsx",
-        type: "array",
-      }) as ArrayBuffer;
-      const path = await invoke<string>("save_excel_backup", {
-        filename,
-        bytes: Array.from(new Uint8Array(content)),
-      });
-      setBackupStatus({
-        type: "success",
-        message: `已导出 ${records.length} 条记录到 ${path}`,
-      });
-    } catch {
-      XLSX.writeFile(wb, filename);
-      setBackupStatus({
-        type: "success",
-        message: `已导出 ${records.length} 条记录到 ${filename}`,
-      });
-    }
+    const bytes = await encodeLedgerWorkbook({
+      records,
+      categories,
+      openingBalance,
+    });
+    const destination = await deliverLedgerWorkbookFile(filename, bytes);
+    setBackupStatus({
+      type: "success",
+      message: `已导出 ${records.length} 条记录到 ${destination}`,
+    });
   }
 
   function openImportPicker() {
@@ -843,153 +625,19 @@ function App() {
 
   async function importFromFile(file: File) {
     try {
-      const XLSX = await loadXLSX();
       const data = await file.arrayBuffer();
-      const wb = XLSX.read(data, { cellDates: true });
-      const recordSheet =
-        wb.Sheets[EXCEL_RECORD_SHEET] ?? wb.Sheets[wb.SheetNames[0]];
-      if (!recordSheet) {
+      const decoded = await decodeLedgerWorkbook(data);
+      if (!decoded.ok) {
         setBackupStatus({
           type: "error",
-          message: "导入失败：Excel 中没有可读取的工作表",
+          message: decoded.error.message,
         });
         return;
       }
 
-      const usedIds = new Set<string>();
-      const importedCats: Category[] = [];
-      const catByKey = new Map<string, Category>();
-      // name(lowercased) → its type, or "ambiguous" if the same name appears
-      // under both types. Used to classify records whose row has no 类型 cell.
-      const typeByName = new Map<string, CategoryType | "ambiguous">();
-      const catSheet = wb.Sheets[EXCEL_CATEGORY_SHEET];
-
-      if (catSheet) {
-        const rows = XLSX.utils.sheet_to_json<ExcelRow>(catSheet, {
-          defval: "",
-        });
-        rows.forEach((row, idx) => {
-          const name = String(
-            readExcelCell(row, ["分类名称", "分类", "name"]),
-          ).trim();
-          const type = parseCategoryType(
-            readExcelCell(row, ["类型", "收支类型", "type"]),
-          );
-          if (!name || !type) return;
-          const lname = name.toLowerCase();
-          const seenType = typeByName.get(lname);
-          typeByName.set(
-            lname,
-            seenType !== undefined && seenType !== type ? "ambiguous" : type,
-          );
-          const catKey = `${type}:${name}`;
-          // 同名同类型的重复行：跳过，否则会造出一个 0 记录的幽灵分类
-          // （catByKey 已去重，但 importedCats 仍会被推入两次）。
-          if (catByKey.has(catKey)) return;
-          const rawId = String(readExcelCell(row, ["分类ID", "id"])).trim();
-          const id =
-            rawId && !usedIds.has(rawId)
-              ? rawId
-              : makeCategoryId(name, type, usedIds);
-          usedIds.add(id);
-          const shape =
-            parseShape(readExcelCell(row, ["形状", "shape"])) ??
-            SHAPES[idx % SHAPES.length];
-          const swatchRaw = String(
-            readExcelCell(row, ["颜色", "color", "swatch"]),
-          ).trim();
-          const swatch = /^#([\da-f]{3}|[\da-f]{6})$/i.test(swatchRaw)
-            ? swatchRaw
-            : PALETTE[idx % PALETTE.length];
-          const cat: Category = { id, name, type, shape, swatch };
-          importedCats.push(cat);
-          catByKey.set(catKey, cat);
-        });
-      }
-
-      const recordRows = XLSX.utils.sheet_to_json<ExcelRow>(recordSheet, {
-        defval: "",
-      });
-      let skipped = 0;
-      // 去重记录 id：手改的表里可能有重复「记录ID」，撞了就分配一个唯一兜底值，
-      // 否则两条记录共用 id 会让编辑/删除同时命中多条。
-      const usedRecordIds = new Set<number>();
-      let recordIdSeq = Date.now() + recordRows.length;
-      const importedRecords = recordRows.reduce<RecordItem[]>((items, row, idx) => {
-        const rawAmount = parseExcelAmount(readExcelCell(row, ["金额", "amount"]));
-        const typeFromCell = parseCategoryType(
-          readExcelCell(row, ["类型", "收支类型", "type"]),
-        );
-        const categoryName = String(
-          readExcelCell(row, ["分类", "分类名称", "category"]),
-        ).trim();
-        // 无「类型」列时：优先按分类表里同名分类的类型判定 —— 导出的金额恒为正，
-        // 单看符号会把所有支出误判成收入。仅当分类表查不到 / 同名跨类型有歧义时，
-        // 才退回按金额符号猜测。
-        const knownType = typeByName.get(categoryName.toLowerCase());
-        const type =
-          typeFromCell ??
-          (knownType && knownType !== "ambiguous"
-            ? knownType
-            : rawAmount < 0
-              ? "expense"
-              : "income");
-        const date = parseExcelDate(readExcelCell(row, ["日期", "date"]), XLSX);
-        const amount = Math.abs(rawAmount);
-        if (
-          !categoryName ||
-          !date ||
-          !Number.isFinite(amount) ||
-          amount <= 0
-        ) {
-          skipped += 1;
-          return items;
-        }
-        const key = `${type}:${categoryName}`;
-        let cat = catByKey.get(key);
-        if (!cat) {
-          cat = {
-            id: makeCategoryId(categoryName, type, usedIds),
-            name: categoryName,
-            type,
-            shape: SHAPES[importedCats.length % SHAPES.length],
-            swatch: PALETTE[importedCats.length % PALETTE.length],
-          };
-          importedCats.push(cat);
-          catByKey.set(key, cat);
-        }
-        let id = parseExcelRecordId(
-          readExcelCell(row, ["记录ID", "id"]),
-          Date.now() + idx,
-        );
-        while (usedRecordIds.has(id)) id = ++recordIdSeq;
-        usedRecordIds.add(id);
-        items.push({
-          id,
-          catId: cat.id,
-          amount,
-          date,
-          note: String(readExcelCell(row, ["备注", "note"])).trim(),
-        });
-        return items;
-      }, []);
-
-      if (
-        !isImportableWorkbook({
-          sourceRecordRows: recordRows.length,
-          validRecords: importedRecords.length,
-          importedCategories: importedCats.length,
-        })
-      ) {
-        setBackupStatus({
-          type: "error",
-          message: "导入失败：Excel 中没有有效的收支记录",
-        });
-        return;
-      }
-
+      const { candidate, diagnostics } = decoded;
       const ok = window.confirm(
-        `导入会覆盖当前 ${records.length} 条记录、${categories.length} 个分类。确认导入 ${importedRecords.length} 条记录、${importedCats.length} 个分类？`,
+        `导入会覆盖当前 ${records.length} 条记录、${categories.length} 个分类。确认导入 ${diagnostics.importedRecords} 条记录、${diagnostics.importedCategories} 个分类？`,
       );
       if (!ok) {
         setBackupStatus({ type: "idle", message: "" });
@@ -997,8 +645,8 @@ function App() {
       }
       const result = dispatchLedger({
         type: "import.replace",
-        records: importedRecords,
-        categories: importedCats,
+        records: candidate.records,
+        categories: candidate.categories,
       });
       if (!result.ok) {
         setBackupStatus({
@@ -1009,8 +657,10 @@ function App() {
       }
       setBackupStatus({
         type: "success",
-        message: `已导入 ${importedRecords.length} 条记录、${importedCats.length} 个分类${
-          skipped > 0 ? ` · 跳过 ${skipped} 行` : ""
+        message: `已导入 ${diagnostics.importedRecords} 条记录、${diagnostics.importedCategories} 个分类${
+          diagnostics.skippedRecordRows > 0
+            ? ` · 跳过 ${diagnostics.skippedRecordRows} 行`
+            : ""
         }`,
       });
     } catch {
@@ -2315,7 +1965,7 @@ function CategoriesPage({
     name: "",
     type: "expense",
     shape: "square",
-    swatch: PALETTE[0],
+    swatch: CATEGORY_SWATCHES[0],
   });
 
   const { exp, inc, countByCat } = useMemo(() => {
@@ -2339,7 +1989,7 @@ function CategoriesPage({
       name: "",
       type: form.type,
       shape: "square",
-      swatch: PALETTE[0],
+      swatch: CATEGORY_SWATCHES[0],
     });
   }
 
@@ -2412,7 +2062,7 @@ function CategoriesPage({
               <div className="v2-cat-form-field">
                 <label>形状</label>
                 <div className="v2-cat-shapes">
-                  {SHAPES.map((s) => (
+                  {CATEGORY_SHAPES.map((s) => (
                     <button
                       key={s}
                       type="button"
@@ -2427,7 +2077,7 @@ function CategoriesPage({
               <div className="v2-cat-form-field">
                 <label>颜色</label>
                 <div className="v2-cat-colors">
-                  {PALETTE.map((c) => (
+                  {CATEGORY_SWATCHES.map((c) => (
                     <button
                       key={c}
                       type="button"

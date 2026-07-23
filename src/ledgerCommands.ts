@@ -6,6 +6,25 @@ export type CatShape =
   | "triangle"
   | "halfcircle";
 
+export const CATEGORY_SHAPES: readonly CatShape[] = [
+  "square",
+  "circle",
+  "diamond",
+  "triangle",
+  "halfcircle",
+];
+
+export const CATEGORY_SWATCHES = [
+  "#B5532A",
+  "#7C3A0E",
+  "#5C7C2C",
+  "#92400E",
+  "#9B2226",
+  "#3D405B",
+  "#264653",
+  "#000000",
+] as const;
+
 export type Category = {
   id: string;
   name: string;
