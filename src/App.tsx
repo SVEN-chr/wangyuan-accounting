@@ -5,7 +5,6 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 import {
   CATEGORY_SHAPES,
@@ -42,6 +41,8 @@ import {
 } from "./ledgerWorkbook";
 import { deliverLedgerWorkbookFile } from "./ledgerWorkbookFile";
 import { useRuntimeLedgerSession } from "./useLedgerSession";
+import { type UpdateState } from "./updateController";
+import { useRuntimeUpdateController } from "./useUpdateController";
 
 /* =================================================================
    Types & constants
@@ -69,47 +70,9 @@ type BackupStatus = {
   message: string;
 };
 
-type UpdatePhase =
-  | "idle"
-  | "checking"
-  | "available"
-  | "downloading"
-  | "uptodate"
-  | "error";
-
-type UpdateState = {
-  phase: UpdatePhase;
-  version?: string;
-  notes?: string;
-  downloaded?: number;
-  total?: number;
-  error?: string;
-};
-
-// Minimal structural shapes for @tauri-apps/plugin-updater (dynamically imported,
-// so we don't pull the plugin types into the browser/dev build).
-type UpdateDownloadEvent =
-  | { event: "Started"; data: { contentLength?: number } }
-  | { event: "Progress"; data: { chunkLength: number } }
-  | { event: "Finished" };
-
-type PendingUpdate = {
-  version: string;
-  body?: string;
-  downloadAndInstall: (
-    onEvent?: (event: UpdateDownloadEvent) => void,
-  ) => Promise<void>;
-};
-
 // Fallback shown before the runtime getVersion() resolves (and in browser dev mode).
 // Keep in sync with package.json / tauri.conf.json / Cargo.toml on each release.
 const APP_VERSION = "0.1.7";
-
-function describeError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  return String(error);
-}
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
@@ -365,12 +328,20 @@ function CatGlyph({
 ================================================================= */
 
 function App() {
+  const ledgerSession = useRuntimeLedgerSession({
+    seedRecords: SAMPLE_RECORDS,
+  });
   const {
     ledger,
     saveStatus,
     dispatch: dispatchLedger,
-    flush: flushSave,
-  } = useRuntimeLedgerSession({ seedRecords: SAMPLE_RECORDS });
+  } = ledgerSession;
+  const {
+    state: updateState,
+    check: checkForUpdate,
+    install: runUpdate,
+    dismiss: dismissUpdate,
+  } = useRuntimeUpdateController({ flushLedger: ledgerSession.flush });
   const { records, categories, openingBalance } = ledger;
   const [page, setPage] = useState<PageKey>("ledger");
   const [modalOpen, setModalOpen] = useState(false);
@@ -384,7 +355,6 @@ function App() {
     type: "idle",
     message: "",
   });
-  const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -396,118 +366,7 @@ function App() {
     });
   }, [saveStatus]);
 
-  /* ---- auto-update (Tauri-only; silently no-ops in browser/dev) ---- */
-  const pendingUpdateRef = useRef<PendingUpdate | null>(null);
-  const checkInFlightRef = useRef(false);
-  const installingRef = useRef(false);
-  // 若静默检查进行中用户点了「检查更新」，把这次结果按手动展示（显示 已最新/错误）
-  const manualPendingRef = useRef(false);
-
-  async function checkForUpdate(manual: boolean) {
-    if (installingRef.current) return; // 正在下载安装，忽略检查
-    if (checkInFlightRef.current) {
-      // 已有检查在进行（通常是启动时的静默检查）：手动点击立即给反馈，
-      // 并把这次进行中的检查结果升级为「手动」展示，避免点了没反应。
-      if (manual) {
-        manualPendingRef.current = true;
-        setUpdateState({ phase: "checking" });
-      }
-      return;
-    }
-    checkInFlightRef.current = true;
-    if (manual) setUpdateState({ phase: "checking" });
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      // 20s 超时：网络不通时尽快失败，别把按钮一直卡在「检查中」/锁住后续点击
-      const update = (await check({ timeout: 20000 })) as PendingUpdate | null;
-      const asManual = manual || manualPendingRef.current;
-      if (update) {
-        pendingUpdateRef.current = update;
-        setUpdateState({
-          phase: "available",
-          version: update.version,
-          notes: update.body || undefined,
-        });
-      } else {
-        pendingUpdateRef.current = null;
-        setUpdateState(asManual ? { phase: "uptodate" } : { phase: "idle" });
-      }
-    } catch (error) {
-      pendingUpdateRef.current = null;
-      const asManual = manual || manualPendingRef.current;
-      // 浏览器 / 无 Tauri 环境：静默；只有用户主动检查才提示
-      if (asManual) {
-        setUpdateState({
-          phase: "error",
-          error:
-            !isTauri()
-              ? "仅桌面端支持检查更新"
-              : describeError(error),
-        });
-      } else {
-        setUpdateState({ phase: "idle" });
-      }
-    } finally {
-      checkInFlightRef.current = false;
-      manualPendingRef.current = false;
-    }
-  }
-
-  async function runUpdate() {
-    const update = pendingUpdateRef.current;
-    if (!update || installingRef.current) return;
-    installingRef.current = true;
-    try {
-      // 安装会退出并重启 App —— 先把最后一笔编辑落盘
-      const saveResult = await flushSave();
-      if (saveResult && !saveResult.ok && !saveResult.recoverySaved) {
-        throw new Error(`更新已取消：${saveResult.error}`);
-      }
-      let total = 0;
-      let downloaded = 0;
-      setUpdateState({
-        phase: "downloading",
-        version: update.version,
-        downloaded: 0,
-        total: 0,
-      });
-      await update.downloadAndInstall((event) => {
-        switch (event.event) {
-          case "Started":
-            total = event.data.contentLength ?? 0;
-            break;
-          case "Progress":
-            downloaded += event.data.chunkLength;
-            break;
-          case "Finished":
-            downloaded = total;
-            break;
-        }
-        setUpdateState({
-          phase: "downloading",
-          version: update.version,
-          downloaded,
-          total,
-        });
-      });
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
-    } catch (error) {
-      // 失败时复位，让用户可重试
-      installingRef.current = false;
-      setUpdateState({
-        phase: "error",
-        version: update.version,
-        error: describeError(error),
-      });
-    }
-  }
-
-  function dismissUpdate() {
-    setUpdateState({ phase: "idle" });
-  }
-
-  /* ---- on mount: resolve real app version + silent update check ---- */
+  /* ---- on mount: resolve real app version ---- */
   useEffect(() => {
     void (async () => {
       try {
@@ -517,8 +376,6 @@ function App() {
         /* 浏览器模式：保留 APP_VERSION 常量 */
       }
     })();
-    void checkForUpdate(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ---- derived ---- */
@@ -769,7 +626,7 @@ function App() {
                   type="button"
                   className="v2-btn-primary v2-update-btn"
                   onClick={() =>
-                    void (pendingUpdateRef.current
+                    void (updateState.version
                       ? runUpdate()
                       : checkForUpdate(true))
                   }
