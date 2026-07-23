@@ -5,6 +5,7 @@ import {
   createLedgerSession,
   type LedgerLifecycleAdapter,
   type LedgerPersistenceAdapter,
+  type SaveResult,
 } from "./ledgerSession";
 import { DEFAULT_CATEGORIES, type Ledger } from "./ledgerCommands";
 
@@ -143,6 +144,43 @@ describe("账本持久化适配器", () => {
 });
 
 describe("账本会话", () => {
+  it("默认等待 300ms 后只保存防抖期间的最新账本", async () => {
+    vi.useFakeTimers();
+    try {
+      const persisted: number[] = [];
+      const adapter: LedgerPersistenceAdapter = {
+        load: async () => ({
+          data: diskLedger,
+          storeExists: true,
+          recoveredPending: false,
+        }),
+        save: async (ledger) => {
+          persisted.push(ledger.openingBalance);
+          return { ok: true };
+        },
+        finalizeSuccessfulSave: () => ({ ok: true }),
+        storeRecovery: () => true,
+        syncFallback: () => true,
+        hasFirstRunSeeded: () => true,
+        markFirstRunSeeded: () => true,
+      };
+      const session = createLedgerSession({ adapter });
+      await session.start();
+
+      session.dispatch({ type: "opening-balance.set", value: 600 });
+      session.dispatch({ type: "opening-balance.set", value: 700 });
+      await vi.advanceTimersByTimeAsync(299);
+      expect(persisted).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await session.flush();
+      expect(persisted).toEqual([700]);
+      expect(session.getSnapshot().saveStatus).toEqual({ type: "success" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("连续刷新时按提交顺序保存内存适配器收到的快照", async () => {
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => {
@@ -325,6 +363,74 @@ describe("账本会话", () => {
     releaseSave();
     await session.flush();
     expect(finalized).toBe(0);
+  });
+
+  it("关窗等待三秒后同步恢复失败时允许用户取消关闭", async () => {
+    vi.useFakeTimers();
+    try {
+      let closeHandler: Parameters<
+        LedgerLifecycleAdapter["onCloseRequested"]
+      >[0] | null = null;
+      let beforeUnloadHandler: (() => void) | null = null;
+      const confirm = vi.fn(() => false);
+      const close = vi.fn();
+      const recovered: number[] = [];
+      const synced: number[] = [];
+      const lifecycle: LedgerLifecycleAdapter = {
+        onBeforeUnload: (handler) => {
+          beforeUnloadHandler = handler;
+          return () => undefined;
+        },
+        onCloseRequested: async (handler) => {
+          closeHandler = handler;
+          return () => undefined;
+        },
+        confirm,
+      };
+      const adapter: LedgerPersistenceAdapter = {
+        load: async () => ({
+          data: diskLedger,
+          storeExists: true,
+          recoveredPending: false,
+        }),
+        save: () => new Promise<SaveResult>(() => undefined),
+        finalizeSuccessfulSave: () => ({ ok: true }),
+        storeRecovery: (ledger) => {
+          recovered.push(ledger.openingBalance);
+          return false;
+        },
+        syncFallback: (ledger) => {
+          synced.push(ledger.openingBalance);
+          return true;
+        },
+        hasFirstRunSeeded: () => true,
+        markFirstRunSeeded: () => true,
+      };
+      const session = createLedgerSession({ adapter, lifecycle });
+      await session.start();
+      await Promise.resolve();
+      session.dispatch({ type: "opening-balance.set", value: 888 });
+
+      beforeUnloadHandler!();
+      expect(synced).toEqual([888]);
+      session.dispatch({ type: "opening-balance.set", value: 999 });
+
+      const preventDefault = vi.fn();
+      const closing = closeHandler!({ preventDefault, close });
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(recovered).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(recovered).toEqual([999]);
+      expect(confirm).toHaveBeenCalledWith(
+        "保存超时，且本地恢复缓存写入失败。最后一次编辑可能丢失。\n仍要关闭吗？",
+      );
+      expect(close).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("保存失败公开恢复状态且下一次最新成功保存才完成恢复", async () => {

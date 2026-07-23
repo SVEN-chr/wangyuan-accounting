@@ -522,4 +522,34 @@ describe("账本用户行为基线", () => {
     expect(JSON.parse(savedPayload).openingBalance).toBe(654);
     expect(windowMocks.close).toHaveBeenCalledOnce();
   });
+
+  it("账本会话保存失败时在账目页显示全局错误提示", async () => {
+    const diskData = { records: [], categories, openingBalance: 500 };
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "load_accounting_store") {
+        return JSON.stringify(diskData);
+      }
+      if (command === "save_accounting_store") {
+        throw new Error("disk unavailable");
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    render(<App />);
+
+    await screen.findByText("暂无记录");
+    fireEvent.click(screen.getByTitle("点击编辑期初余额"));
+    const balanceInput =
+      document.querySelector<HTMLInputElement>(".v2-rec-edit");
+    fireEvent.change(balanceInput as HTMLInputElement, {
+      target: { value: "777" },
+    });
+    fireEvent.keyDown(balanceInput as HTMLInputElement, { key: "Enter" });
+
+    await vi.advanceTimersByTimeAsync(300);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(
+      "保存失败：disk unavailable · 已写入本地缓存",
+    );
+  });
 });

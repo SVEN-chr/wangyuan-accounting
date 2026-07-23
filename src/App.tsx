@@ -13,8 +13,6 @@ import {
   type Category,
   type CategoryType,
   type CatShape,
-  type LedgerCommand,
-  type LedgerCommandResult,
   type LedgerEntry as RecordItem,
 } from "./ledgerCommands";
 import {
@@ -37,9 +35,7 @@ import {
   type LedgerQuery,
   type LedgerStats as Stats,
 } from "./ledgerQueries";
-import {
-  createRuntimeLedgerSession,
-} from "./ledgerSession";
+import { useRuntimeLedgerSession } from "./useLedgerSession";
 
 type XLSXModule = typeof import("xlsx");
 let xlsxModulePromise: Promise<XLSXModule> | null = null;
@@ -516,19 +512,12 @@ function CatGlyph({
 ================================================================= */
 
 function App() {
-  const ledgerSessionRef = useRef<ReturnType<
-    typeof createRuntimeLedgerSession
-  > | null>(null);
-  if (!ledgerSessionRef.current) {
-    ledgerSessionRef.current = createRuntimeLedgerSession({
-      seedRecords: SAMPLE_RECORDS,
-    });
-  }
-  const ledgerSession = ledgerSessionRef.current;
-  const [sessionSnapshot, setSessionSnapshot] = useState(() =>
-    ledgerSession.getSnapshot(),
-  );
-  const ledger = sessionSnapshot.ledger;
+  const {
+    ledger,
+    saveStatus,
+    dispatch: dispatchLedger,
+    flush: flushSave,
+  } = useRuntimeLedgerSession({ seedRecords: SAMPLE_RECORDS });
   const { records, categories, openingBalance } = ledger;
   const [page, setPage] = useState<PageKey>("ledger");
   const [modalOpen, setModalOpen] = useState(false);
@@ -545,25 +534,14 @@ function App() {
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [appVersion, setAppVersion] = useState<string>(APP_VERSION);
   const importInputRef = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    const unsubscribe = ledgerSession.subscribe(setSessionSnapshot);
-    void ledgerSession.start();
-    return () => {
-      unsubscribe();
-      ledgerSession.dispose();
-    };
-  }, [ledgerSession]);
 
   useEffect(() => {
-    if (sessionSnapshot.saveStatus.type !== "error") return;
+    if (saveStatus.type !== "error") return;
     setBackupStatus({
       type: "error",
-      message: sessionSnapshot.saveStatus.message,
+      message: saveStatus.message,
     });
-  }, [sessionSnapshot.saveStatus]);
-
-  // Shared by the updater; close-requested and beforeunload are owned by the session.
-  const flushSave = () => ledgerSession.flush();
+  }, [saveStatus]);
 
   /* ---- auto-update (Tauri-only; silently no-ops in browser/dev) ---- */
   const pendingUpdateRef = useRef<PendingUpdate | null>(null);
@@ -708,10 +686,6 @@ function App() {
   );
 
   /* ---- actions ---- */
-  function dispatchLedger(command: LedgerCommand): LedgerCommandResult {
-    return ledgerSession.dispatch(command);
-  }
-
   function openAddModal(type: CategoryType = "expense") {
     setForm(createInitialForm(categories, type));
     setEditId(null);
