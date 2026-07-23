@@ -15,14 +15,11 @@ import {
   type LedgerEntry as RecordItem,
 } from "./ledgerCommands";
 import {
-  dateKey,
-  formatCompactAmount as fmtCompact,
   formatMoney as fmtMoney,
   todayKey as today,
 } from "./ledgerFormat";
 import {
   createLedgerQuery,
-  type BreakdownItem,
   type LedgerQuery,
   type LedgerStats as Stats,
 } from "./ledgerQueries";
@@ -35,6 +32,7 @@ import { useRuntimeLedgerSession } from "./useLedgerSession";
 import { type UpdateState } from "./updateController";
 import { useRuntimeUpdateController } from "./useUpdateController";
 import { LedgerFeature } from "./features/ledger/LedgerFeature";
+import { StatsFeature } from "./features/stats/StatsFeature";
 import { CatGlyph } from "./ui/CatGlyph";
 
 /* =================================================================
@@ -109,10 +107,6 @@ const SAMPLE_RECORDS: RecordItem[] = [
   { id: 130, catId: "rent", amount: 6800, date: "2026-04-01", note: "工作室三月" },
 ];
 
-const netColor = (net: number): string =>
-  net > 0 ? "#5C7C2C" : net < 0 ? "#7C3A0E" : "#FAF3E2";
-
-const DOW_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
 /* =================================================================
    App
 ================================================================= */
@@ -380,7 +374,7 @@ function App() {
       />
 
       {page === "stats" && (
-        <StatsPage query={query} />
+        <StatsFeature query={query} />
       )}
 
       {page === "cats" && (
@@ -480,360 +474,6 @@ function TopBar({
         </button>
       </div>
     </header>
-  );
-}
-
-/* =================================================================
-   Stats page
-================================================================= */
-function BreakdownBars({
-  items,
-  total,
-  emptyText,
-}: {
-  items: BreakdownItem[];
-  total: number;
-  emptyText: string;
-}) {
-  if (items.length === 0) {
-    return <div className="v2-empty">{emptyText}</div>;
-  }
-  return (
-    <>
-      {items.map((c) => {
-        const pct = (c.amount / total) * 100;
-        return (
-          <div key={c.id} className="v2-stats-bar">
-            <div className="v2-stats-bar-head">
-              <span>
-                <CatGlyph shape={c.shape} color={c.swatch} size={10} />
-                {c.name}
-              </span>
-              <span className="mono">{fmtMoney(c.amount, 0)}</span>
-            </div>
-            <div className="v2-stats-bar-track">
-              <div
-                className="v2-stats-bar-fill"
-                style={{ width: `${pct}%`, background: c.swatch }}
-              />
-              <span className="mono v2-stats-pct">{pct.toFixed(1)}%</span>
-            </div>
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
-function StatsPage({ query }: { query: LedgerQuery }) {
-  const todayKey = dateKey(new Date());
-  const report = useMemo(
-    () => query.statistics(todayKey),
-    [query, todayKey],
-  );
-  const expenseBreakdown = report.breakdowns.expense;
-  const incomeBreakdown = report.breakdowns.income;
-  const expenseCats = expenseBreakdown.items;
-  const incomeCats = incomeBreakdown.items;
-  const totalExp = expenseBreakdown.total;
-  const totalInc = incomeBreakdown.total;
-
-  const currentMonthKey = todayKey.slice(0, 7);
-  const monthSeries = report.monthSeries.map((month) => ({
-    m: month.key,
-    income: month.income,
-    expense: month.expense,
-  }));
-  const monthSeq = report.monthSeries.map((month) => month.key);
-  const maxM = report.maxMonthValue;
-  const maxNet = report.maxNet;
-
-  const yNet = (net: number) =>
-    net >= 0 ? 200 - (net / maxNet) * 120 : 200 + (-net / maxNet) * 70;
-
-  const incomeStats = {
-    max: report.income.maxEntry,
-    mean: report.income.mean,
-  };
-  const dow = report.expenseByWeekday.values;
-  const maxDow = report.expenseByWeekday.max;
-  const peakDow = report.expenseByWeekday.peakIndex;
-  const savingRate = report.savingRate;
-  const ratio = report.incomeExpenseRatio;
-
-  return (
-    <>
-      <div className="v2-greet" style={{ paddingBottom: 20 }}>
-        <div className="v2-greet-l">
-          <div className="v2-greet-time mono">STATS · 统 计 报 告</div>
-          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
-            财 务 体 检 ·
-            <span className="v2-greet-name"> {currentMonthKey.slice(5)} 月</span>
-          </div>
-          <div className="v2-greet-sub">六个月趋势 · 分类构成 · 周内分布</div>
-        </div>
-        <div className="v2-greet-r">
-          <div className="v2-greet-stat">
-            <div className="mono">储蓄率</div>
-            <div className="v2-greet-num positive">
-              {Math.round(savingRate)}%
-            </div>
-          </div>
-          <div className="v2-greet-stat">
-            <div className="mono">收支比</div>
-            <div className="v2-greet-num">{ratio.toFixed(2)}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="v2-body single">
-        <main className="v2-main">
-          {/* Trend chart */}
-          <section className="v2-chart-card">
-            <div className="v2-card-head">
-              <div>
-                <h3>六 个 月 收 支 走 势</h3>
-                <div className="mono">
-                  {monthSeq[0]} → {monthSeq[5]} · MoM
-                </div>
-              </div>
-              <div className="v2-legend">
-                <span>
-                  <span className="dot income" /> 收入
-                </span>
-                <span>
-                  <span className="dot expense" /> 支出
-                </span>
-                <span style={{ marginLeft: 12, color: "var(--v2-terra-deep)" }}>
-                  ━ 净结余 · 上正下负
-                </span>
-              </div>
-            </div>
-            <div className="v2-stats-trend">
-              <svg
-                viewBox="0 0 800 290"
-                preserveAspectRatio="none"
-                style={{ width: "100%", height: 290 }}
-              >
-                {/* Above-baseline grid (bar area) */}
-                {[0, 0.25, 0.5, 0.75, 1].map((p, i) => (
-                  <line
-                    key={i}
-                    x1="40"
-                    x2="800"
-                    y1={20 + p * 180}
-                    y2={20 + p * 180}
-                    stroke="#C9B690"
-                    strokeDasharray="3 4"
-                    strokeWidth="0.5"
-                  />
-                ))}
-                {/* Zero baseline */}
-                <line
-                  x1="40"
-                  x2="800"
-                  y1="200"
-                  y2="200"
-                  stroke="#7C3A0E"
-                  strokeWidth="1"
-                  opacity="0.35"
-                />
-                {/* Below-baseline grid (negative net area) */}
-                <line
-                  x1="40"
-                  x2="800"
-                  y1="245"
-                  y2="245"
-                  stroke="#C9B690"
-                  strokeDasharray="3 4"
-                  strokeWidth="0.5"
-                />
-                {monthSeries.map((s, i) => {
-                  const x = 80 + i * 130;
-                  const incH = (s.income / maxM) * 180;
-                  const expH = (s.expense / maxM) * 180;
-                  const incRatio = s.income / maxM;
-                  const expRatio = s.expense / maxM;
-                  return (
-                    <g key={s.m}>
-                      <rect
-                        x={x - 22}
-                        y={200 - incH}
-                        width="20"
-                        height={incH}
-                        fill="#5C7C2C"
-                      />
-                      <rect
-                        x={x + 2}
-                        y={200 - expH}
-                        width="20"
-                        height={expH}
-                        fill="#B5532A"
-                      />
-                      {incRatio > 0.04 && (
-                        <text
-                          x={x - 12}
-                          y={200 - incH - 6}
-                          fontSize="10"
-                          fill="#5C7C2C"
-                          textAnchor="middle"
-                          style={{ fontFamily: "var(--v2-mono)" }}
-                        >
-                          {fmtCompact(s.income)}
-                        </text>
-                      )}
-                      {expRatio > 0.04 && (
-                        <text
-                          x={x + 12}
-                          y={200 - expH - 6}
-                          fontSize="10"
-                          fill="#B5532A"
-                          textAnchor="middle"
-                          style={{ fontFamily: "var(--v2-mono)" }}
-                        >
-                          {fmtCompact(s.expense)}
-                        </text>
-                      )}
-                    </g>
-                  );
-                })}
-                {/* Net line — signed: positive goes up, negative goes down */}
-                <path
-                  d={monthSeries
-                    .map((s, i) => {
-                      const x = 80 + i * 130;
-                      const y = yNet(s.income - s.expense);
-                      return `${i === 0 ? "M" : "L"}${x},${y}`;
-                    })
-                    .join(" ")}
-                  fill="none"
-                  stroke="#7C3A0E"
-                  strokeWidth="2"
-                />
-                {monthSeries.map((s, i) => {
-                  const x = 80 + i * 130;
-                  const net = s.income - s.expense;
-                  const y = yNet(net);
-                  return (
-                    <circle
-                      key={i}
-                      cx={x}
-                      cy={y}
-                      r="4"
-                      fill={netColor(net)}
-                      stroke="#7C3A0E"
-                      strokeWidth="2"
-                    >
-                      <title>
-                        {s.m} 净结余 {net >= 0 ? "+" : "−"}
-                        {fmtCompact(Math.abs(net))}
-                      </title>
-                    </circle>
-                  );
-                })}
-                {/* Month labels — at the bottom, below negative-net area */}
-                {monthSeries.map((s, i) => {
-                  const x = 80 + i * 130;
-                  return (
-                    <text
-                      key={s.m}
-                      x={x}
-                      y="282"
-                      fontSize="11"
-                      fill="#5C4A33"
-                      textAnchor="middle"
-                      style={{ fontFamily: "var(--v2-mono)" }}
-                    >
-                      {s.m.slice(5)}月
-                    </text>
-                  );
-                })}
-              </svg>
-            </div>
-          </section>
-
-          {/* Two columns */}
-          <section className="v2-charts even">
-            <div className="v2-chart-card">
-              <div className="v2-card-head">
-                <div>
-                  <h3>支 出 构 成</h3>
-                  <div className="mono">
-                    EXPENSE · {expenseCats.length} 类
-                  </div>
-                </div>
-              </div>
-              <div className="v2-stats-bars">
-                <BreakdownBars
-                  items={expenseCats}
-                  total={totalExp}
-                  emptyText="暂无支出数据"
-                />
-              </div>
-            </div>
-
-            <div className="v2-chart-card">
-              <div className="v2-card-head">
-                <div>
-                  <h3>收 入 构 成</h3>
-                  <div className="mono">INCOME · {incomeCats.length} 类</div>
-                </div>
-              </div>
-              <div className="v2-stats-bars">
-                <BreakdownBars
-                  items={incomeCats}
-                  total={totalInc}
-                  emptyText="暂无收入数据"
-                />
-              </div>
-              {incomeCats.length > 0 && (
-                <div className="v2-stats-side">
-                  <div className="v2-stats-side-row">
-                    <span className="mono">最大单笔收入</span>
-                    <span>
-                      {incomeStats.max
-                        ? `${query.category(incomeStats.max.catId).name} · ${fmtMoney(incomeStats.max.amount, 0)}`
-                        : "—"}
-                    </span>
-                  </div>
-                  <div className="v2-stats-side-row">
-                    <span className="mono">平均单笔收入</span>
-                    <span>{fmtMoney(incomeStats.mean, 0)}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* Day of week */}
-          <section className="v2-chart-card">
-            <div className="v2-card-head">
-              <div>
-                <h3>周 内 支 出 分 布</h3>
-                <div className="mono">BY DAY OF WEEK</div>
-              </div>
-              <div className="mono">周{DOW_LABEL[peakDow]} 支出最高</div>
-            </div>
-            <div className="v2-dow">
-              {dow.map((v, i) => {
-                const h = (v / maxDow) * 140;
-                return (
-                  <div key={i} className="v2-dow-col">
-                    <div className="v2-dow-bar-wrap">
-                      <span className="mono v2-dow-amt">
-                        {fmtMoney(v, 0)}
-                      </span>
-                      <div className="v2-dow-bar" style={{ height: h }} />
-                    </div>
-                    <div className="v2-dow-label">周 {DOW_LABEL[i]}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        </main>
-      </div>
-    </>
   );
 }
 

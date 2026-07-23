@@ -32,6 +32,7 @@ export type MonthSeriesItem = {
   key: string;
   income: number;
   expense: number;
+  net: number;
 };
 
 export type LedgerOverview = {
@@ -53,6 +54,7 @@ export type LedgerOverview = {
 export type BreakdownItem = Category & { amount: number };
 
 export type LedgerStatistics = {
+  referenceMonth: string;
   breakdowns: Record<
     CategoryType,
     { items: BreakdownItem[]; total: number }
@@ -155,11 +157,11 @@ function buildMonthSeries(
   stats: LedgerStats,
   referenceMonth: string,
 ): MonthSeriesItem[] {
-  return buildMonthSequence(records, referenceMonth).map((key) => ({
-    key,
-    income: stats.byMonth[key]?.income ?? 0,
-    expense: stats.byMonth[key]?.expense ?? 0,
-  }));
+  return buildMonthSequence(records, referenceMonth).map((key) => {
+    const income = stats.byMonth[key]?.income ?? 0;
+    const expense = stats.byMonth[key]?.expense ?? 0;
+    return { key, income, expense, net: income - expense };
+  });
 }
 
 function summarizeMonths(
@@ -176,7 +178,7 @@ function summarizeMonths(
   let maxNet = 1;
   for (const month of series) {
     maxValue = Math.max(maxValue, month.income, month.expense);
-    maxNet = Math.max(maxNet, Math.abs(month.income - month.expense));
+    maxNet = Math.max(maxNet, Math.abs(month.net));
   }
   return { series, maxValue, maxNet };
 }
@@ -366,10 +368,11 @@ export function createLedgerQuery(ledger: Ledger): LedgerQuery {
       };
     },
     statistics(referenceDay) {
+      const referenceMonth = referenceDay.slice(0, 7);
       const monthSummary = summarizeMonths(
         ledger.records,
         stats,
-        referenceDay.slice(0, 7),
+        referenceMonth,
       );
 
       let maxIncomeEntry: LedgerEntry | null = null;
@@ -403,6 +406,7 @@ export function createLedgerQuery(ledger: Ledger): LedgerQuery {
       }
 
       return {
+        referenceMonth,
         breakdowns: {
           expense: breakdown("expense"),
           income: breakdown("income"),

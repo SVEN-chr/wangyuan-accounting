@@ -151,6 +151,30 @@ describe("账本热力图查询", () => {
 });
 
 describe("统计页查询", () => {
+  it("未来账目扩展六个月窗口但体检参考月仍锚定当前日历月", () => {
+    const report = createLedgerQuery({
+      categories,
+      openingBalance: 0,
+      records: [
+        { id: 1, catId: "income-books", amount: 100, date: "2026-06-20" },
+        { id: 2, catId: "expense-books", amount: 40, date: "2026-06-21" },
+        { id: 3, catId: "income-books", amount: 250, date: "2026-07-18" },
+        { id: 4, catId: "expense-books", amount: 100, date: "2026-07-18" },
+        { id: 5, catId: "expense-books", amount: 300, date: "2026-08-19" },
+      ],
+    }).statistics("2026-07-18");
+
+    expect(report.referenceMonth).toBe("2026-07");
+    expect(report.monthSeries).toEqual([
+      { key: "2026-03", income: 0, expense: 0, net: 0 },
+      { key: "2026-04", income: 0, expense: 0, net: 0 },
+      { key: "2026-05", income: 0, expense: 0, net: 0 },
+      { key: "2026-06", income: 100, expense: 40, net: 60 },
+      { key: "2026-07", income: 250, expense: 100, net: 150 },
+      { key: "2026-08", income: 0, expense: 300, net: -300 },
+    ]);
+  });
+
   it("集中返回分类、月份、收入和周内支出口径", () => {
     const query = createLedgerQuery({
       categories,
