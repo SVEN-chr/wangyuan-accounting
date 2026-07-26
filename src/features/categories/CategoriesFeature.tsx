@@ -6,8 +6,7 @@ import {
   type Category,
   type CategoryType,
   type CatShape,
-  type LedgerCommand,
-  type LedgerCommandResult,
+  type LedgerDispatch,
 } from "../../ledgerCommands";
 import { formatMoney } from "../../ledgerFormat";
 import {
@@ -15,6 +14,7 @@ import {
   type LedgerStats,
 } from "../../ledgerQueries";
 import { CatGlyph } from "../../ui/CatGlyph";
+import { FeatureHeader } from "../../ui/FeatureHeader";
 import "./categories.css";
 
 type CategoryForm = {
@@ -23,8 +23,6 @@ type CategoryForm = {
   shape: CatShape;
   swatch: string;
 };
-
-type LedgerDispatch = (command: LedgerCommand) => LedgerCommandResult;
 
 export function CategoriesFeature({
   query,
@@ -85,21 +83,18 @@ export function CategoriesFeature({
 
   return (
     <>
-      <div className="v2-greet" style={{ paddingBottom: 20 }}>
-        <div className="v2-greet-l">
-          <div className="v2-greet-time mono">CATEGORIES · 分 类 管 理</div>
-          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
-            账 目 类 别 ·
-            <span className="v2-greet-name"> {categories.length} 类</span>
-          </div>
-          <div className="v2-greet-sub">用色块/形状区分类别 · 自定义无上限</div>
-        </div>
-        <div className="v2-greet-r">
+      <FeatureHeader
+        eyebrow="CATEGORIES · 分 类 管 理"
+        title="账 目 类 别 ·"
+        accent={` ${categories.length} 类`}
+        subtitle="用色块/形状区分类别 · 自定义无上限"
+        actions={
           <button className="v2-btn-primary" type="button" onClick={submit}>
             + 新增分类
           </button>
-        </div>
-      </div>
+        }
+        compact
+      />
 
       <div className="v2-body single">
         <main className="v2-main">

@@ -486,5 +486,12 @@ describe("账本用户行为基线", () => {
     expect(alert.textContent).toContain(
       "保存失败：disk unavailable · 已写入本地缓存",
     );
+
+    fireEvent.click(alert);
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "备份" }));
+    expect(
+      screen.queryByText("保存失败：disk unavailable · 已写入本地缓存"),
+    ).toBeNull();
   });
 });

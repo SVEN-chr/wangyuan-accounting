@@ -12,8 +12,7 @@ import {
   DEFAULT_CATEGORIES,
   type Category,
   type CategoryType,
-  type LedgerCommand,
-  type LedgerCommandResult,
+  type LedgerDispatch,
   type LedgerEntry,
 } from "../../ledgerCommands";
 import {
@@ -33,6 +32,7 @@ import {
   type LedgerQuery,
 } from "../../ledgerQueries";
 import { CatGlyph } from "../../ui/CatGlyph";
+import { FeatureHeader } from "../../ui/FeatureHeader";
 import "./ledger.css";
 
 type RecordForm = {
@@ -42,8 +42,6 @@ type RecordForm = {
   date: string;
   note: string;
 };
-
-type LedgerDispatch = (command: LedgerCommand) => LedgerCommandResult;
 
 type LedgerFeatureProps = {
   active: boolean;
@@ -287,33 +285,23 @@ function GreetingStrip({
   const daysToMonthEnd = Math.max(0, lastDayOfMonth - date.getDate());
 
   return (
-    <div className="v2-greet">
-      <div className="v2-greet-l">
-        <div className="v2-greet-time mono">
-          {dateText} · 周{weekdayCN(date)}
-        </div>
-        <div className="v2-greet-hi">
-          {timeGreeting(date).split("").join(" ")}，
-          <span className="v2-greet-name">王 源</span>
-        </div>
-        <div className="v2-greet-sub">
-          今日已记 {recordedToday} 笔 · 距月末 {daysToMonthEnd} 日 · {note}
-        </div>
-      </div>
-      <div className="v2-greet-r">
-        <div className="v2-greet-stat">
-          <div className="mono">今日支出</div>
-          <div className="v2-greet-num">{formatMoney(todayExpense)}</div>
-        </div>
-        <div className="v2-greet-stat">
-          <div className="mono">本周净流入</div>
-          <div className={`v2-greet-num ${weekNet >= 0 ? "positive" : ""}`}>
-            {weekNet >= 0 ? "+" : "−"}
-            {formatMoney(Math.abs(weekNet), 0)}
-          </div>
-        </div>
-      </div>
-    </div>
+    <FeatureHeader
+      eyebrow={`${dateText} · 周${weekdayCN(date)}`}
+      title={`${timeGreeting(date).split("").join(" ")}，`}
+      accent="王 源"
+      subtitle={`今日已记 ${recordedToday} 笔 · 距月末 ${daysToMonthEnd} 日 · ${note}`}
+      metrics={[
+        { label: "今日支出", value: formatMoney(todayExpense) },
+        {
+          label: "本周净流入",
+          value: `${weekNet >= 0 ? "+" : "−"}${formatMoney(
+            Math.abs(weekNet),
+            0,
+          )}`,
+          positive: weekNet >= 0,
+        },
+      ]}
+    />
   );
 }
 

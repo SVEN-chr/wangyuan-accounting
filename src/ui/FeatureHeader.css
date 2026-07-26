@@ -1,0 +1,82 @@
+.v2-greet {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 32px;
+  padding: 32px 40px 26px;
+  background: var(--v2-paper);
+  border-bottom: 1px dashed var(--v2-rule);
+}
+.v2-greet.compact {
+  padding-bottom: 20px;
+}
+.v2-greet-l {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.v2-greet-time {
+  font-size: 11px;
+  color: var(--v2-ink-mute);
+}
+.v2-greet-hi {
+  font-size: 42px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  color: var(--v2-ink);
+}
+.v2-greet.compact .v2-greet-hi {
+  font-size: 36px;
+}
+.v2-greet-name {
+  color: var(--v2-terra-deep);
+  border-bottom: 3px solid var(--v2-terra);
+  padding-bottom: 2px;
+}
+.v2-greet-sub {
+  font-size: 13px;
+  color: var(--v2-ink-soft);
+  margin-top: 2px;
+}
+.v2-greet-r {
+  display: flex;
+  gap: 28px;
+  align-items: flex-end;
+}
+.v2-greet-stat {
+  text-align: right;
+  padding-left: 28px;
+  border-left: 1px dashed var(--v2-rule);
+}
+.v2-greet-stat:first-child {
+  border-left: 0;
+  padding-left: 0;
+}
+.v2-greet-num {
+  font-family: var(--v2-mono);
+  font-size: 24px;
+  color: var(--v2-ink);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.v2-greet-num.positive {
+  color: var(--v2-olive);
+}
+
+@media (max-width: 1100px) {
+  .v2-greet {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .v2-greet-r {
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .v2-greet:not(.compact) .v2-greet-hi {
+    font-size: 32px;
+  }
+}

@@ -6,6 +6,7 @@ import {
 } from "../../ledgerFormat";
 import type { BreakdownItem, LedgerQuery } from "../../ledgerQueries";
 import { CatGlyph } from "../../ui/CatGlyph";
+import { FeatureHeader } from "../../ui/FeatureHeader";
 import "./stats.css";
 
 const DOW_LABEL = ["日", "一", "二", "三", "四", "五", "六"];
@@ -88,33 +89,24 @@ export function StatsFeature({ query }: { query: LedgerQuery }) {
 
   return (
     <>
-      <div className="v2-greet" style={{ paddingBottom: 20 }}>
-        <div className="v2-greet-l">
-          <div className="v2-greet-time mono">STATS · 统 计 报 告</div>
-          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
-            财 务 体 检 ·
-            <span className="v2-greet-name">
-              {" "}
-              {report.referenceMonth.slice(5)} 月
-            </span>
-          </div>
-          <div className="v2-greet-sub">六个月趋势 · 分类构成 · 周内分布</div>
-        </div>
-        <div className="v2-greet-r">
-          <div className="v2-greet-stat">
-            <div className="mono">储蓄率</div>
-            <div className="v2-greet-num positive">
-              {Math.round(report.savingRate)}%
-            </div>
-          </div>
-          <div className="v2-greet-stat">
-            <div className="mono">收支比</div>
-            <div className="v2-greet-num">
-              {report.incomeExpenseRatio.toFixed(2)}
-            </div>
-          </div>
-        </div>
-      </div>
+      <FeatureHeader
+        eyebrow="STATS · 统 计 报 告"
+        title="财 务 体 检 ·"
+        accent={` ${report.referenceMonth.slice(5)} 月`}
+        subtitle="六个月趋势 · 分类构成 · 周内分布"
+        metrics={[
+          {
+            label: "储蓄率",
+            value: `${Math.round(report.savingRate)}%`,
+            positive: true,
+          },
+          {
+            label: "收支比",
+            value: report.incomeExpenseRatio.toFixed(2),
+          },
+        ]}
+        compact
+      />
 
       <div className="v2-body single">
         <main className="v2-main">

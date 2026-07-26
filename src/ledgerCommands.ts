@@ -108,6 +108,8 @@ export type LedgerCommandResult =
       error: { code: LedgerCommandErrorCode; message: string };
     };
 
+export type LedgerDispatch = (command: LedgerCommand) => LedgerCommandResult;
+
 function reject(
   code: LedgerCommandErrorCode,
   message: string,
