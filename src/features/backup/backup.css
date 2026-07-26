@@ -1,0 +1,171 @@
+.v2-backup-card {
+  background: var(--v2-paper);
+  padding: 32px 36px;
+  border: 1px solid var(--v2-rule-soft);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.v2-backup-card.export {
+  border-top: 4px solid var(--v2-olive);
+}
+.v2-backup-card.import {
+  border-top: 4px solid var(--v2-terra);
+}
+.v2-backup-tag {
+  font-size: 11px;
+  color: var(--v2-ink-mute);
+  font-family: var(--v2-mono);
+  letter-spacing: 0.2em;
+}
+.v2-backup-h {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+  color: var(--v2-ink);
+}
+.v2-backup-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--v2-ink-soft);
+  max-width: 480px;
+}
+.v2-backup-stat {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  padding: 18px 0;
+  border-top: 1px dashed var(--v2-rule);
+  border-bottom: 1px dashed var(--v2-rule);
+}
+.v2-backup-stat .mono {
+  font-size: 11px;
+}
+.v2-backup-num {
+  font-family: var(--v2-mono);
+  font-size: 20px;
+  margin-top: 4px;
+  color: var(--v2-ink);
+}
+.v2-backup-btn {
+  padding: 14px 20px;
+  align-self: flex-start;
+}
+.v2-backup-drop {
+  padding: 50px 20px;
+  text-align: center;
+  background: var(--v2-paper-2);
+  border: 2px dashed var(--v2-rule);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.v2-backup-drop:hover,
+.v2-backup-drop.dragging {
+  border-color: var(--v2-terra);
+  background: var(--v2-cream);
+}
+.v2-drop-icon {
+  width: 48px;
+  height: 48px;
+  border: 2px dashed var(--v2-terra);
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  color: var(--v2-terra);
+  margin-bottom: 8px;
+}
+.v2-drop-title {
+  font-size: 18px;
+  letter-spacing: 0.18em;
+  color: var(--v2-ink);
+}
+.v2-drop-sub {
+  font-size: 11px;
+}
+.v2-backup-warn {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  background: var(--v2-terra-wash);
+  border-left: 3px solid var(--v2-terra);
+}
+.v2-warn-stamp {
+  width: 28px;
+  height: 28px;
+  background: var(--v2-terra);
+  color: var(--v2-paper);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.v2-warn-title {
+  font-size: 14px;
+  color: var(--v2-ink);
+}
+.v2-warn-sub {
+  font-size: 11px;
+  margin-top: 2px;
+  color: var(--v2-ink-mute);
+  font-family: var(--v2-mono);
+}
+.v2-backup-status {
+  font-size: 12px;
+  padding: 10px 14px;
+  border: 1px dashed var(--v2-rule);
+  font-family: var(--v2-mono);
+  letter-spacing: 0.05em;
+}
+.v2-backup-status.success {
+  color: var(--v2-olive);
+  border-color: var(--v2-olive);
+  background: var(--v2-olive-tint);
+}
+.v2-backup-status.error {
+  color: var(--v2-terra-deep);
+  border-color: var(--v2-terra);
+  background: var(--v2-terra-tint);
+}
+.v2-file-input-hidden {
+  display: none;
+}
+.v2-backup-card.about {
+  grid-column: 1 / -1;
+  border-top: 4px solid var(--v2-olive);
+}
+.v2-about-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-top: 1px dashed var(--v2-rule);
+  border-bottom: 1px dashed var(--v2-rule);
+}
+.v2-about-row .mono {
+  font-size: 11px;
+}
+.v2-about-row .v2-backup-btn {
+  align-self: center;
+  margin: 0;
+}
+.v2-about-avail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px dashed var(--v2-olive);
+  background: var(--v2-olive-tint);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  color: var(--v2-ink);
+}

@@ -1,0 +1,28 @@
+:root {
+  --v2-bg: #efe5d2;
+  --v2-paper: #faf3e2;
+  --v2-paper-2: #f4ead2;
+  --v2-ink: #2a1f12;
+  --v2-ink-soft: #5c4a33;
+  --v2-ink-mute: #8e795a;
+  --v2-rule: #c9b690;
+  --v2-rule-soft: #dccda8;
+  --v2-terra: #b5532a;
+  --v2-terra-deep: #7c3a0e;
+  --v2-terra-soft: #e8b97a;
+  --v2-olive: #5c7c2c;
+  --v2-cream: #f5e6cc;
+  --v2-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --v2-terra-wash: rgba(181, 83, 42, 0.08);
+  --v2-terra-tint: rgba(181, 83, 42, 0.06);
+  --v2-olive-tint: rgba(92, 124, 44, 0.06);
+  --v2-shadow-toast: 0 6px 24px rgba(0, 0, 0, 0.12);
+  --v2-shadow-banner: 0 10px 32px rgba(0, 0, 0, 0.18);
+  --v2-ledger-lines: repeating-linear-gradient(
+    0deg,
+    transparent 0,
+    transparent 31px,
+    rgba(160, 130, 80, 0.05) 31px,
+    rgba(160, 130, 80, 0.05) 32px
+  );
+}

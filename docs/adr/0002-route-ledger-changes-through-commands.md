@@ -1,0 +1,3 @@
+# Route ledger changes through one command interface
+
+All ledger changes pass through `applyLedgerCommand(ledger, command)` in `src/ledgerCommands.ts` instead of features coordinating `records`, `categories`, and `openingBalance` setters. Its `entry.*`, `category.*`, `opening-balance.set`, and `import.replace` commands own validation, identifier collisions, category deletion effects, imported-ledger replacement and the other ledger invariants. React submits intentions through the session's `dispatch` method and renders the returned ledger or error, keeping complete ledger behavior testable without React or storage.
