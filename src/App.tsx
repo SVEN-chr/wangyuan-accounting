@@ -6,22 +6,14 @@ import {
 } from "react";
 import "./App.css";
 import {
-  CATEGORY_SHAPES,
-  CATEGORY_SWATCHES,
-  DEFAULT_CATEGORY_IDS,
   type Category,
-  type CategoryType,
-  type CatShape,
   type LedgerEntry as RecordItem,
 } from "./ledgerCommands";
 import {
-  formatMoney as fmtMoney,
   todayKey as today,
 } from "./ledgerFormat";
 import {
   createLedgerQuery,
-  type LedgerQuery,
-  type LedgerStats as Stats,
 } from "./ledgerQueries";
 import {
   decodeLedgerWorkbook,
@@ -31,22 +23,15 @@ import { deliverLedgerWorkbookFile } from "./ledgerWorkbookFile";
 import { useRuntimeLedgerSession } from "./useLedgerSession";
 import { type UpdateState } from "./updateController";
 import { useRuntimeUpdateController } from "./useUpdateController";
+import { CategoriesFeature } from "./features/categories/CategoriesFeature";
 import { LedgerFeature } from "./features/ledger/LedgerFeature";
 import { StatsFeature } from "./features/stats/StatsFeature";
-import { CatGlyph } from "./ui/CatGlyph";
 
 /* =================================================================
    Types & constants
 ================================================================= */
 
 type PageKey = "ledger" | "stats" | "cats" | "backup";
-
-type CategoryForm = {
-  name: string;
-  type: CategoryType;
-  shape: CatShape;
-  swatch: string;
-};
 
 type BackupStatus = {
   type: "idle" | "success" | "error";
@@ -158,27 +143,6 @@ function App() {
 
   /* ---- derived ---- */
   const query = useMemo(() => createLedgerQuery(ledger), [ledger]);
-
-  /* ---- actions ---- */
-  function addCategory(c: Omit<Category, "id">): void {
-    dispatchLedger({
-      type: "category.create",
-      preferredId: Date.now(),
-      category: c,
-    });
-  }
-
-  function deleteCategory(id: string) {
-    if (DEFAULT_CATEGORY_IDS.has(id)) return;
-    const impact = query.categoryDeletionImpact(id);
-    if (!impact) return;
-    const warning =
-      impact.affectedEntries > 0
-        ? `删除分类「${impact.categoryName}」会同时永久删除 ${impact.affectedEntries} 条关联账目。此操作无法撤销，确认继续吗？`
-        : `确认删除分类「${impact.categoryName}」吗？`;
-    if (!window.confirm(warning)) return;
-    dispatchLedger({ type: "category.delete", id });
-  }
 
   /* ---- backup ---- */
   async function exportBackup() {
@@ -378,10 +342,9 @@ function App() {
       )}
 
       {page === "cats" && (
-        <CategoriesPage
+        <CategoriesFeature
           query={query}
-          onAdd={addCategory}
-          onDelete={deleteCategory}
+          dispatch={dispatchLedger}
         />
       )}
 
@@ -474,250 +437,6 @@ function TopBar({
         </button>
       </div>
     </header>
-  );
-}
-
-/* =================================================================
-   Categories page
-================================================================= */
-function CategoriesPage({
-  query,
-  onAdd,
-  onDelete,
-}: {
-  query: LedgerQuery;
-  onAdd: (c: Omit<Category, "id">) => void;
-  onDelete: (id: string) => void;
-}) {
-  const { categories } = query.ledger;
-  const { stats } = query;
-  const [form, setForm] = useState<CategoryForm>({
-    name: "",
-    type: "expense",
-    shape: "square",
-    swatch: CATEGORY_SWATCHES[0],
-  });
-
-  const { exp, inc, countByCat } = useMemo(() => {
-    const summary = query.categorySummary();
-    return {
-      exp: summary.expense,
-      inc: summary.income,
-      countByCat: summary.entryCountByCategory,
-    };
-  }, [query]);
-
-  function submit() {
-    if (!form.name.trim()) return;
-    onAdd({
-      name: form.name,
-      type: form.type,
-      shape: form.shape,
-      swatch: form.swatch,
-    });
-    setForm({
-      name: "",
-      type: form.type,
-      shape: "square",
-      swatch: CATEGORY_SWATCHES[0],
-    });
-  }
-
-  return (
-    <>
-      <div className="v2-greet" style={{ paddingBottom: 20 }}>
-        <div className="v2-greet-l">
-          <div className="v2-greet-time mono">CATEGORIES · 分 类 管 理</div>
-          <div className="v2-greet-hi" style={{ fontSize: 36 }}>
-            账 目 类 别 ·
-            <span className="v2-greet-name"> {categories.length} 类</span>
-          </div>
-          <div className="v2-greet-sub">用色块/形状区分类别 · 自定义无上限</div>
-        </div>
-        <div className="v2-greet-r">
-          <button className="v2-btn-primary" type="button" onClick={submit}>
-            + 新增分类
-          </button>
-        </div>
-      </div>
-
-      <div className="v2-body single">
-        <main className="v2-main">
-          {/* Form */}
-          <section className="v2-chart-card">
-            <div className="v2-card-head">
-              <div>
-                <h3>新 增 分 类</h3>
-                <div className="mono">CREATE CATEGORY</div>
-              </div>
-            </div>
-            <div className="v2-cat-form">
-              <div className="v2-cat-form-field">
-                <label>类型</label>
-                <div className="v2-cat-type">
-                  <button
-                    type="button"
-                    className={
-                      form.type === "expense" ? "active expense" : ""
-                    }
-                    onClick={() =>
-                      setForm((f) => ({ ...f, type: "expense" }))
-                    }
-                  >
-                    支出
-                  </button>
-                  <button
-                    type="button"
-                    className={form.type === "income" ? "active income" : ""}
-                    onClick={() =>
-                      setForm((f) => ({ ...f, type: "income" }))
-                    }
-                  >
-                    收入
-                  </button>
-                </div>
-              </div>
-              <div className="v2-cat-form-field">
-                <label>名称</label>
-                <input
-                  className="v2-cat-input"
-                  placeholder="例如：办公用品"
-                  value={form.name}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, name: e.target.value }))
-                  }
-                  onKeyDown={(e) => e.key === "Enter" && submit()}
-                />
-              </div>
-              <div className="v2-cat-form-field">
-                <label>形状</label>
-                <div className="v2-cat-shapes">
-                  {CATEGORY_SHAPES.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className={form.shape === s ? "active" : ""}
-                      onClick={() => setForm((f) => ({ ...f, shape: s }))}
-                    >
-                      <CatGlyph shape={s} color={form.swatch} size={14} />
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="v2-cat-form-field">
-                <label>颜色</label>
-                <div className="v2-cat-colors">
-                  {CATEGORY_SWATCHES.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      className={`v2-color-sw ${
-                        form.swatch === c ? "active" : ""
-                      }`}
-                      style={{ background: c }}
-                      onClick={() => setForm((f) => ({ ...f, swatch: c }))}
-                      aria-label={c}
-                    />
-                  ))}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="v2-btn-primary v2-cat-submit"
-                onClick={submit}
-              >
-                保 存 分 类
-              </button>
-            </div>
-          </section>
-
-          {/* Lists */}
-          <section className="v2-charts even">
-            <div className="v2-chart-card">
-              <div className="v2-card-head">
-                <div>
-                  <h3>支 出 分 类</h3>
-                  <div className="mono">{exp.length} 类</div>
-                </div>
-              </div>
-              <CategoryList
-                cats={exp}
-                stats={stats}
-                countByCat={countByCat}
-                onDelete={onDelete}
-              />
-            </div>
-            <div className="v2-chart-card">
-              <div className="v2-card-head">
-                <div>
-                  <h3>收 入 分 类</h3>
-                  <div className="mono">{inc.length} 类</div>
-                </div>
-              </div>
-              <CategoryList
-                cats={inc}
-                stats={stats}
-                countByCat={countByCat}
-                onDelete={onDelete}
-              />
-            </div>
-          </section>
-        </main>
-      </div>
-    </>
-  );
-}
-
-function CategoryList({
-  cats,
-  stats,
-  countByCat,
-  onDelete,
-}: {
-  cats: Category[];
-  stats: Stats;
-  countByCat: Record<string, number>;
-  onDelete: (id: string) => void;
-}) {
-  if (cats.length === 0)
-    return <div className="v2-empty">暂无分类</div>;
-  return (
-    <div className="v2-cat-list-2">
-      {cats.map((c) => {
-        const amount = stats.byCat[c.id] || 0;
-        const count = countByCat[c.id] || 0;
-        const isDefault = DEFAULT_CATEGORY_IDS.has(c.id);
-        return (
-          <div key={c.id} className="v2-cat-card">
-            <div className="v2-cat-card-l">
-              <CatGlyph shape={c.shape} color={c.swatch} size={20} />
-              <div>
-                <div className="v2-cat-card-name">
-                  {c.name}
-                  {isDefault && (
-                    <span className="v2-cat-card-meta-tag">默认</span>
-                  )}
-                </div>
-                <div className="v2-cat-card-meta">
-                  {count} 条记录 · {fmtMoney(amount, 0)}
-                </div>
-              </div>
-            </div>
-            <div className="v2-cat-card-r">
-              {!isDefault && (
-                <button
-                  className="v2-cat-action danger mono"
-                  type="button"
-                  onClick={() => onDelete(c.id)}
-                >
-                  删除
-                </button>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
