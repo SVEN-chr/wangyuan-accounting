@@ -57,7 +57,7 @@ jobs:
           fi
 
       - name: Validate application version
-        run: node scripts/check-version.mjs "${{ steps.tag.outputs.value }}"
+        run: pnpm check:release -- --tag="${{ steps.tag.outputs.value }}" --repository="${{ github.repository }}"
 
       - name: Build Tauri app & publish release
         uses: tauri-apps/tauri-action@v0
@@ -76,9 +76,9 @@ jobs:
           args: --bundles nsis
 
       # tauri-action 在 productName 含 CJK 时无法生成更新清单（"Signature not found
-      # for the updater JSON"），且 GitHub 会把上传资产名里的中文清掉。这里自行用磁盘上
-      # 已签名的 .sig + 实际上传的资产名拼出 latest.json，供 updater 的 releases/latest
-      # /download/latest.json 端点拉取。仅在创建了 Release（tag 非空）时执行。
+      # for the updater JSON"），且 GitHub 会把上传资产名里的中文清掉。工作流只收集
+      # GitHub 实际资产与本地签名；可测试的版本、镜像和清单规则由 release contract
+      # module 负责。仅在创建了 Release（tag 非空）时执行。
       - name: Generate & upload updater latest.json
         if: steps.tag.outputs.value != ''
         shell: pwsh
@@ -86,26 +86,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.tag.outputs.value }}"
-          $version = $tag.TrimStart('v')
-          $sigFile = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *-setup.exe.sig | Select-Object -First 1
-          if (-not $sigFile) { throw "updater signature (*-setup.exe.sig) not found — 确认 createUpdaterArtifacts + 签名密钥已配置" }
-          $sig = (Get-Content $sigFile.FullName -Raw).Trim() -replace "`r`n","`n"
-          # Select-Object -First 1：万一 release 上有多个 *-setup.exe 资产，避免 $assetName 变成数组
-          # 进而把 url 拼成空格连接的非法串。
-          $assetName = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name|endswith("-setup.exe")) | .name' | Select-Object -First 1
-          if (-not $assetName) { throw "uploaded -setup.exe asset not found on release $tag" }
-          # 安装包下载 URL 走 GitHub 加速镜像，这样没有代理的国内用户也能下载更新。
-          # latest.json 里每平台只能写一个 url（无 fallback）——若该镜像失效，改这里的
-          # $mirror 重新发版即可。清单本身的拉取在 tauri.conf.json 里配了多个镜像端点兜底。
-          $mirror = "https://ghfast.top"
-          $url = "$mirror/https://github.com/$($env:GITHUB_REPOSITORY)/releases/download/$tag/$assetName"
-          $obj = [ordered]@{
-            version   = $version
-            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-            platforms = [ordered]@{ "windows-x86_64" = [ordered]@{ signature = $sig; url = $url } }
-          }
-          # utf8NoBOM：显式无 BOM —— 带 BOM 的 latest.json 会让 updater 的 serde_json 解析失败。
-          $obj | ConvertTo-Json -Depth 6 | Set-Content -Path latest.json -Encoding utf8NoBOM -NoNewline
+          $assetsJson = Join-Path $env:RUNNER_TEMP "wangyuan-release-assets.json"
+          $assets = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets
+          if ($LASTEXITCODE -ne 0) { throw "failed to read release assets for $tag" }
+          $assets | Set-Content -LiteralPath $assetsJson -Encoding utf8NoBOM -NoNewline
+          node scripts/release-cli.mjs manifest $tag $env:GITHUB_REPOSITORY $assetsJson src-tauri/target/release/bundle/nsis latest.json
           Write-Host "----- latest.json -----"; Get-Content latest.json -Raw
           gh release upload $tag latest.json --repo $env:GITHUB_REPOSITORY --clobber
 

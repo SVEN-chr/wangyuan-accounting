@@ -11,6 +11,7 @@ import { type UpdateState } from "../../updateController";
 import { FeatureHeader } from "../../ui/FeatureHeader";
 import { formatUpdatePercent } from "../../ui/updateProgress";
 import { type BackupStatusControl } from "./useBackupStatus";
+import packageJson from "../../../package.json";
 import "./backup.css";
 
 type BackupFeatureProps = {
@@ -23,10 +24,6 @@ type BackupFeatureProps = {
   onRunUpdate: () => void;
 };
 
-// Fallback shown before the runtime getVersion() resolves (and in browser dev
-// mode). Keep in sync with package.json / tauri.conf.json / Cargo.toml.
-const APP_VERSION = "0.1.7";
-
 export function BackupFeature({
   active,
   query,
@@ -37,7 +34,7 @@ export function BackupFeature({
   onRunUpdate,
 }: BackupFeatureProps) {
   const { records, categories } = query.ledger;
-  const [appVersion, setAppVersion] = useState(APP_VERSION);
+  const [appVersion, setAppVersion] = useState(packageJson.version);
   const [dragging, setDragging] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const filename = `wangyuan-${todayKey()}.xlsx`;

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
+    "check:release": "node scripts/release-cli.mjs check",
     "preview": "vite preview",
     "tauri": "tauri",
     "icons": "node scripts/build-icons.mjs"
