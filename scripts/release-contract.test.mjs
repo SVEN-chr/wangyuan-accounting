@@ -83,6 +83,46 @@ describe("发布契约", () => {
     ).toBe("1.2.3");
   });
 
+  it("拒绝核心版本号中的前导零", () => {
+    expect(() =>
+      verifyReleaseContract({
+        root: createProjectFixture({ packageVersion: "01.2.3" }),
+        releaseTag: "v01.2.3",
+        repository: "example/books",
+      }),
+    ).toThrow(/有效 SemVer/);
+  });
+
+  it("拒绝空的预发布标识符", () => {
+    expect(() =>
+      verifyReleaseContract({
+        root: createProjectFixture({ packageVersion: "1.2.3-alpha..1" }),
+        releaseTag: "v1.2.3-alpha..1",
+        repository: "example/books",
+      }),
+    ).toThrow(/有效 SemVer/);
+  });
+
+  it("拒绝纯数字预发布标识符中的前导零", () => {
+    expect(() =>
+      verifyReleaseContract({
+        root: createProjectFixture({ packageVersion: "1.2.3-alpha.01" }),
+        releaseTag: "v1.2.3-alpha.01",
+        repository: "example/books",
+      }),
+    ).toThrow(/有效 SemVer/);
+  });
+
+  it("拒绝空的构建元数据标识符", () => {
+    expect(() =>
+      verifyReleaseContract({
+        root: createProjectFixture({ packageVersion: "1.2.3+build..1" }),
+        releaseTag: "v1.2.3+build..1",
+        repository: "example/books",
+      }),
+    ).toThrow(/有效 SemVer/);
+  });
+
   it("拒绝 Cargo 版本偏离唯一版本来源", () => {
     expect(() =>
       verifyReleaseContract({
